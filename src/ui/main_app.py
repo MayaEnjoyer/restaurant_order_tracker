@@ -1,23 +1,28 @@
 # ui/main_app.py
 import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
+from tkinter import ttk, messagebox, simpledialog, filedialog
 from typing import Tuple, List, Optional
+from datetime import datetime, timedelta
+import csv
 
 
 class MainApp(tk.Toplevel):
     """
-    Главное окно приложения.
+    Главное окно (учёт роли).
 
-    Вкладки:
-      • Orders — оформление нового заказа (категория → товары → корзина), список заказов,
-                  фильтры по статусу и поиску, просмотр деталей, перевод статуса, отмена.
-      • Admin  — (только после ввода Admin Access Code и только для роли admin)
-                 управление меню (категории/позиции), а также диспетчер заказов.
-    Аккаунт:
-      • Смена пароля пользователем.
-      • Смена Admin Access Code (только admin).
+    USER:
+      - Слева собирает корзину и создаёт заказ через диалог (DINE_IN/TAKEAWAY/DELIVERY).
+      - Правая панель 'My Orders' показывается сразу при входе, если у пользователя уже были заказы.
+        Если заказов ещё нет — панель скрыта до создания первого заказа.
+      - В 'My Orders' по умолчанию показываются ВСЕ статусы; пользователь может только
+        смотреть детали и ОТМЕНИТЬ свой заказ.
+
+    ADMIN:
+      - Справа видит общий реестр заказов со сменой статусов.
+      - Вкладка Admin (после ввода Admin Access Code) для меню/заказов/аналитики.
     """
 
+    # --------------------------------------------------------------------- init
     def __init__(self, master, db_manager, user_tuple: Tuple[int, str, str], on_logout):
         super().__init__(master)
         self.db = db_manager
@@ -28,20 +33,26 @@ class MainApp(tk.Toplevel):
         self.geometry("1100x700")
         self.minsize(1000, 640)
 
+        # флаг видимости правой панели у пользователя
+        self._user_right_visible = False
+
         self._build_shell()
         self._build_orders_tab()
+
         if self.role == "admin":
             self._maybe_add_admin_tab()
 
         self.protocol("WM_DELETE_WINDOW", self._logout)
 
-    # ---------- Shell (верхняя панель, Notebook) ----------
+    # --------------------------------------------------------------- shell/topbar
     def _build_shell(self):
         topbar = tk.Frame(self)
         topbar.pack(fill="x")
 
         tk.Label(
-            topbar, text=f"Signed in as: {self.username} ({self.role})", font=("Segoe UI", 10)
+            topbar,
+            text=f"Signed in as: {self.username} ({self.role})",
+            font=("Segoe UI", 10),
         ).pack(side="left", padx=10, pady=6)
 
         tk.Button(topbar, text="Change Password", command=self._change_password)\
@@ -57,127 +68,90 @@ class MainApp(tk.Toplevel):
         self.nb = ttk.Notebook(self)
         self.nb.pack(fill="both", expand=True)
 
-    # ---------- Orders tab ----------
+    # --------------------------------------------------------------- Orders tab
     def _build_orders_tab(self):
         self.orders_tab = tk.Frame(self.nb)
         self.nb.add(self.orders_tab, text="Orders")
 
-        # ===== ЛЕВАЯ ПАНЕЛЬ: Новый заказ =====
+        # ----------------------------- Left pane: New Order (visible to all roles)
         left = tk.LabelFrame(self.orders_tab, text="New Order")
         left.pack(side="left", fill="y", padx=10, pady=10)
 
-        # Категории
+        # Categories
         tk.Label(left, text="Category:").grid(row=0, column=0, sticky="w", padx=6, pady=(6, 2))
-        self.categories = self.db.get_categories()  # -> List[(category_id, name)]
+        self.categories = self.db.get_categories()
         self.cat_id_by_name = {name: cid for cid, name in self.categories}
         self.cat_sel = tk.StringVar()
-        names = [name for _, name in self.categories]
-        self.cat_combo = ttk.Combobox(
-            left, textvariable=self.cat_sel, values=names, state="readonly", width=24
-        )
+        cat_names = [name for _, name in self.categories]
+        self.cat_combo = ttk.Combobox(left, textvariable=self.cat_sel, values=cat_names,
+                                      state="readonly", width=24)
         self.cat_combo.grid(row=1, column=0, padx=6, pady=(0, 6))
         self.cat_combo.bind("<<ComboboxSelected>>", lambda e: self._load_items_for_category())
 
-        # Товары
+        # Items list
         self.items_listbox = tk.Listbox(left, width=28, height=14)
         self.items_listbox.grid(row=2, column=0, padx=6, pady=(0, 6))
 
-        # Количество + Добавить в корзину
+        # Qty + Add
         qty_row = tk.Frame(left)
         qty_row.grid(row=3, column=0, sticky="ew", padx=6, pady=(0, 6))
         tk.Label(qty_row, text="Qty:").pack(side="left")
         self.qty_var = tk.IntVar(value=1)
         tk.Spinbox(qty_row, from_=1, to=100, textvariable=self.qty_var, width=6)\
             .pack(side="left", padx=(4, 8))
-        tk.Button(qty_row, text="Add to cart", command=self._cart_add).pack(side="left")
+        tk.Button(qty_row, text="Add to cart", command=self._cart_add)\
+            .pack(side="left")
 
-        # Корзина
+        # Cart
         tk.Label(left, text="Cart:").grid(row=4, column=0, sticky="w", padx=6)
         self.cart_list = tk.Listbox(left, width=28, height=10)
         self.cart_list.grid(row=5, column=0, padx=6, pady=(0, 6))
-        tk.Button(left, text="Remove selected", command=self._cart_remove)\
-            .grid(row=6, column=0, padx=6, pady=(0, 10))
 
-        # Инфо о клиенте
+        row_btns = tk.Frame(left)
+        row_btns.grid(row=6, column=0, sticky="ew", padx=6, pady=(0, 8))
+        tk.Button(row_btns, text="Remove selected", command=self._cart_remove)\
+            .pack(side="left")
+        tk.Button(row_btns, text="Create Order...", command=self._open_create_order_dialog)\
+            .pack(side="right")
+
+        # Customer (optional)
         tk.Label(left, text="Customer name:").grid(row=7, column=0, sticky="w", padx=6)
-        self.customer_var = tk.StringVar()
+        self.customer_var = tk.StringVar(value=self.username if self.role == "user" else "")
         tk.Entry(left, textvariable=self.customer_var, width=28)\
             .grid(row=8, column=0, padx=6, pady=(0, 4))
 
-        tk.Label(left, text="Contact:").grid(row=9, column=0, sticky="w", padx=6)
-        self.contact_var = tk.StringVar()
-        tk.Entry(left, textvariable=self.contact_var, width=28)\
-            .grid(row=10, column=0, padx=6, pady=(0, 4))
+        # ----------------------------- Right pane
+        if self.role == "admin":
+            self._build_admin_right_panel()
+            self._reload_orders_admin()
+        else:
+            # Если у пользователя уже есть заказы — показываем панель сразу и грузим список.
+            try:
+                has_any = len(self.db.get_orders_for_user(self.user_id, limit=1)) > 0
+            except Exception:
+                has_any = False
+            self._build_user_right_panel(hidden=not has_any)
+            if has_any:
+                self.u_status_sel.set("")  # все статусы
+                self._reload_orders_user()
 
-        tk.Label(left, text="Notes:").grid(row=11, column=0, sticky="w", padx=6)
-        self.notes_var = tk.StringVar()
-        tk.Entry(left, textvariable=self.notes_var, width=28)\
-            .grid(row=12, column=0, padx=6, pady=(0, 6))
-
-        tk.Button(left, text="Place Order", command=self._place_order, width=24)\
-            .grid(row=13, column=0, padx=6, pady=(0, 10))
-
-        # ===== ПРАВАЯ ПАНЕЛЬ: Сетка заказов =====
-        right = tk.LabelFrame(self.orders_tab, text="Existing Orders")
-        right.pack(side="right", fill="both", expand=True, padx=10, pady=10)
-
-        filters = tk.Frame(right)
-        filters.pack(fill="x", padx=6, pady=4)
-
-        tk.Label(filters, text="Status:").pack(side="left")
-        self.statuses = ["", "RECEIVED", "IN_PROGRESS", "READY", "COMPLETED", "CANCELED"]
-        self.status_sel = tk.StringVar(value="")
-        ttk.Combobox(filters, textvariable=self.status_sel, values=self.statuses,
-                     width=14, state="readonly").pack(side="left", padx=(4, 12))
-
-        tk.Label(filters, text="Search:").pack(side="left")
-        self.search_var = tk.StringVar()
-        tk.Entry(filters, textvariable=self.search_var, width=26)\
-            .pack(side="left", padx=(4, 8))
-        tk.Button(filters, text="Apply", command=self._reload_orders)\
-            .pack(side="left")
-
-        cols = ("ID", "Date", "Customer", "Status", "Total")
-        self.orders_tree = ttk.Treeview(right, columns=cols, show="headings", height=18)
-        for c in cols:
-            self.orders_tree.heading(c, text=c)
-        self.orders_tree.column("ID", width=70, anchor="center")
-        self.orders_tree.column("Date", width=150)
-        self.orders_tree.column("Customer", width=220)
-        self.orders_tree.column("Status", width=120, anchor="center")
-        self.orders_tree.column("Total", width=90, anchor="e")
-        self.orders_tree.pack(fill="both", expand=True, padx=6, pady=6)
-        self.orders_tree.bind("<Double-1>", lambda e: self._view_order_details())
-
-        btns = tk.Frame(right)
-        btns.pack(fill="x", padx=6, pady=(0, 8))
-        tk.Button(btns, text="Details", command=self._view_order_details).pack(side="left")
-        tk.Button(btns, text="Next Status", command=self._advance_status).pack(side="left", padx=6)
-        tk.Button(btns, text="Cancel", command=self._cancel_order).pack(side="left")
-        tk.Button(btns, text="Refresh", command=self._reload_orders).pack(side="right")
-
-        # Инициализация
-        if names:
-            self.cat_sel.set(names[0])
+        # Init items list
+        if cat_names:
+            self.cat_sel.set(cat_names[0])
             self._load_items_for_category()
-        self._reload_orders()
 
-    # ---------- Orders helpers ----------
+    # ------------------------------------------ Orders helpers (left pane / cart)
     def _load_items_for_category(self):
-        """Загрузить товары выбранной категории в список."""
         self.items_listbox.delete(0, tk.END)
-        self.items_cache = {}
-
         cat = self.cat_sel.get()
         if not cat:
             return
-        cid = self.cat_id_by_name[cat]
-
-        # Ожидается: get_menu_items(category_id=?, active_only=True)
-        # -> List[(item_id, name, price, category_id, is_active)]
+        cid = self.cat_id_by_name.get(cat)
+        if cid is None:
+            return
         items = self.db.get_menu_items(category_id=cid, active_only=True)
-        self.items_cache = {f"{name} (${price:.2f})": (iid, price)
-                            for iid, name, price, _cid, _act in items}
+        # label -> (id, price)
+        self.items_cache = {f"{name} (${price:.2f})": (iid, price) for iid, name, price, _cid, _act in items}
         for label in self.items_cache.keys():
             self.items_listbox.insert(tk.END, label)
 
@@ -194,75 +168,239 @@ class MainApp(tk.Toplevel):
         for i in reversed(sel):
             self.cart_list.delete(i)
 
-    def _place_order(self):
-        """Оформление заказа из корзины."""
+    # ------------------------------------------------------- Create order flow
+    def _open_create_order_dialog(self):
+        """Модальное окно выбора способа обслуживания + адрес для доставки."""
         if self.cart_list.size() == 0:
             messagebox.showwarning("Cart is empty", "Add items to the cart first.")
             return
 
+        dlg = tk.Toplevel(self)
+        dlg.title("Create Order")
+        dlg.geometry("380x220")
+        dlg.transient(self)
+        dlg.grab_set()
+
+        tk.Label(dlg, text="Service type:", font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=10, pady=(10, 4))
+        self._dlg_service_type = tk.StringVar(value="TAKEAWAY")
+        rframe = tk.Frame(dlg); rframe.pack(anchor="w", padx=10, pady=(0, 6))
+        tk.Radiobutton(rframe, text="Dine-in", value="DINE_IN", variable=self._dlg_service_type,
+                       command=lambda: self._toggle_dlg_address()).pack(side="left", padx=(0, 10))
+        tk.Radiobutton(rframe, text="Takeaway", value="TAKEAWAY", variable=self._dlg_service_type,
+                       command=lambda: self._toggle_dlg_address()).pack(side="left", padx=(0, 10))
+        tk.Radiobutton(rframe, text="Delivery", value="DELIVERY", variable=self._dlg_service_type,
+                       command=lambda: self._toggle_dlg_address()).pack(side="left")
+
+        self._dlg_addr_label = tk.Label(dlg, text="Delivery address:")
+        self._dlg_addr_var = tk.StringVar()
+        self._dlg_addr_entry = tk.Entry(dlg, textvariable=self._dlg_addr_var, width=46)
+
+        self._toggle_dlg_address()
+
+        btm = tk.Frame(dlg); btm.pack(fill="x", padx=10, pady=10)
+        tk.Button(btm, text="Cancel", command=dlg.destroy).pack(side="right")
+        tk.Button(btm, text="Confirm", command=lambda: self._confirm_create_order(dlg)).pack(side="right", padx=(0, 8))
+
+    def _toggle_dlg_address(self):
+        # показываем/прячем поле адреса
+        if self._dlg_service_type.get() == "DELIVERY":
+            self._dlg_addr_label.pack(anchor="w", padx=10, pady=(4, 2))
+            self._dlg_addr_entry.pack(anchor="w", padx=10)
+        else:
+            self._dlg_addr_label.pack_forget()
+            self._dlg_addr_entry.pack_forget()
+            self._dlg_addr_var.set("")
+
+    def _confirm_create_order(self, dlg: tk.Toplevel):
+        """Собираем корзину и создаём заказ в БД."""
+        # parse cart -> [(item_id, qty), ...]
         items: List[Tuple[int, int]] = []
         for i in range(self.cart_list.size()):
             row = self.cart_list.get(i)  # "Pizza ($10.00) x 2"
             try:
                 name_part, qty_str = row.rsplit(" x ", 1)
-                item_id, _price = self.items_cache[name_part]
-                items.append((item_id, int(qty_str)))
-            except Exception:
-                # Если строка неожиданного формата — пропустим её
+            except ValueError:
                 continue
+            item_id, _price = self.items_cache[name_part]
+            items.append((item_id, int(qty_str)))
 
-        if not items:
-            messagebox.showwarning("Cart is empty", "No valid items to place.")
+        customer = (self.customer_var.get() or "").strip()
+        stype = self._dlg_service_type.get()
+        addr = (self._dlg_addr_var.get() or "").strip()
+
+        if stype == "DELIVERY" and not addr:
+            messagebox.showerror("Address required", "Please enter delivery address.")
             return
 
         try:
+            # новая сигнатура
             oid = self.db.create_order(
-                self.customer_var.get().strip(),
-                self.contact_var.get().strip(),
-                items,
-                self.notes_var.get().strip(),
+                customer_name=customer,
+                customer_contact="",
+                items=items,
+                notes="",
+                service_type=stype,
+                delivery_address=addr or None,
             )
+        except TypeError:
+            # совместимость: пишем в notes
+            extra = f" | Service: {stype}"
+            if addr:
+                extra += f" | Delivery address: {addr}"
+            oid = self.db.create_order(customer, "", items, extra)
         except Exception as e:
             messagebox.showerror("Order failed", str(e))
             return
 
-        messagebox.showinfo("Success", f"Order #{oid} created (status: RECEIVED).")
-        # Reset
+        dlg.destroy()
+        messagebox.showinfo("Success", f"Order #{oid} created.")
+
+        # очистить форму
         self.cart_list.delete(0, tk.END)
-        self.customer_var.set("")
-        self.contact_var.set("")
-        self.notes_var.set("")
         self.qty_var.set(1)
-        self._reload_orders()
 
-    def _reload_orders(self):
-        """Перезагрузить таблицу заказов справа с учётом фильтров."""
-        for i in self.orders_tree.get_children():
-            self.orders_tree.delete(i)
+        # показать правую панель пользователю и обновить список (все статусы)
+        if self.role == "user":
+            self._ensure_user_right_visible()
+            self.u_status_sel.set("")  # показать все
+            self._reload_orders_user()
+        else:
+            self._reload_orders_admin()
 
-        status = self.status_sel.get() or None
-        search = self.search_var.get()
+    # ------------------------------------------------------ user right panel
+    def _build_user_right_panel(self, hidden: bool = False):
+        """Создаёт правую панель 'My Orders' для пользователя (без смены статусов)."""
+        self.user_right = tk.LabelFrame(self.orders_tab, text="My Orders")
 
-        # Ожидается: get_orders(status: Optional[str], search_text: str, limit: int)
-        # -> List[(order_id, order_date, customer_name, status, total)]
-        for oid, dt, cust, st, total in self.db.get_orders(
-            status=status, search_text=search, limit=400
-        ):
-            self.orders_tree.insert("", "end", values=(oid, dt, cust, st, f"{total:.2f}"))
+        # фильтры
+        filt = tk.Frame(self.user_right)
+        filt.pack(fill="x", padx=6, pady=4)
 
-    def _get_selected_order_id(self) -> Optional[int]:
-        sel = self.orders_tree.focus()
+        tk.Label(filt, text="Status:").pack(side="left")
+        self.u_statuses = ["", "RECEIVED", "IN_PROGRESS", "READY", "COMPLETED", "CANCELED"]
+        self.u_status_sel = tk.StringVar(value="")  # по умолчанию ВСЕ статусы
+        ttk.Combobox(filt, textvariable=self.u_status_sel, values=self.u_statuses,
+                     width=14, state="readonly").pack(side="left", padx=(4, 12))
+
+        tk.Label(filt, text="Search:").pack(side="left")
+        self.u_search_var = tk.StringVar()
+        tk.Entry(filt, textvariable=self.u_search_var, width=26)\
+            .pack(side="left", padx=(4, 8))
+        tk.Button(filt, text="Apply", command=self._reload_orders_user)\
+            .pack(side="left")
+
+        # таблица
+        cols = ("ID", "Date", "Customer", "Status", "Total")
+        self.user_tree = ttk.Treeview(self.user_right, columns=cols, show="headings", height=18)
+        for c in cols:
+            self.user_tree.heading(c, text=c)
+        self.user_tree.column("ID", width=70, anchor="center")
+        self.user_tree.column("Date", width=150)
+        self.user_tree.column("Customer", width=220)
+        self.user_tree.column("Status", width=120, anchor="center")
+        self.user_tree.column("Total", width=90, anchor="e")
+        self.user_tree.pack(fill="both", expand=True, padx=6, pady=6)
+        self.user_tree.bind("<Double-1>", lambda e: self._view_order_details_user())
+
+        # кнопки внизу
+        btns = tk.Frame(self.user_right)
+        btns.pack(fill="x", padx=6, pady=(0, 8))
+        tk.Button(btns, text="Details", command=self._view_order_details_user).pack(side="left")
+        tk.Button(btns, text="Cancel Order", command=self._user_cancel_order).pack(side="left", padx=(6, 0))
+        tk.Button(btns, text="Refresh", command=self._reload_orders_user).pack(side="right")
+
+        if not hidden:
+            self.user_right.pack(side="right", fill="both", expand=True, padx=10, pady=10)
+            self._user_right_visible = True
+
+    def _ensure_user_right_visible(self):
+        if self.role == "user" and not self._user_right_visible:
+            self.user_right.pack(side="right", fill="both", expand=True, padx=10, pady=10)
+            self._user_right_visible = True
+
+    # ------------------------------------------------------ admin right panel
+    def _build_admin_right_panel(self):
+        right = tk.LabelFrame(self.orders_tab, text="Existing Orders")
+        right.pack(side="right", fill="both", expand=True, padx=10, pady=10)
+
+        filters = tk.Frame(right); filters.pack(fill="x", padx=6, pady=4)
+        tk.Label(filters, text="Status:").pack(side="left")
+        self.a_statuses = ["", "RECEIVED", "IN_PROGRESS", "READY", "COMPLETED", "CANCELED"]
+        self.a_status_sel = tk.StringVar(value="")
+        ttk.Combobox(filters, textvariable=self.a_status_sel, values=self.a_statuses,
+                     width=14, state="readonly").pack(side="left", padx=(4, 12))
+        tk.Label(filters, text="Search:").pack(side="left")
+        self.a_search_var = tk.StringVar()
+        tk.Entry(filters, textvariable=self.a_search_var, width=26)\
+            .pack(side="left", padx=(4, 8))
+        tk.Button(filters, text="Apply", command=self._reload_orders_admin).pack(side="left")
+
+        cols = ("ID", "Date", "Customer", "Status", "Total")
+        self.admin_tree = ttk.Treeview(right, columns=cols, show="headings", height=18)
+        for c in cols:
+            self.admin_tree.heading(c, text=c)
+        self.admin_tree.column("ID", width=70, anchor="center")
+        self.admin_tree.column("Date", width=150)
+        self.admin_tree.column("Customer", width=220)
+        self.admin_tree.column("Status", width=120, anchor="center")
+        self.admin_tree.column("Total", width=90, anchor="e")
+        self.admin_tree.pack(fill="both", expand=True, padx=6, pady=6)
+        self.admin_tree.bind("<Double-1>", lambda e: self._view_order_details_admin())
+
+        btns = tk.Frame(right); btns.pack(fill="x", padx=6, pady=(0, 8))
+        tk.Button(btns, text="Details", command=self._view_order_details_admin).pack(side="left")
+        tk.Button(btns, text="Next Status", command=self._advance_status_admin).pack(side="left", padx=6)
+        tk.Button(btns, text="Cancel", command=self._cancel_order_admin).pack(side="left")
+        tk.Button(btns, text="Refresh", command=self._reload_orders_admin).pack(side="right")
+
+    # ---------------------------------------------------------- reload (right)
+    def _reload_orders_user(self):
+        """Обновление списка заказов для текущего пользователя."""
+        if self.role != "user" or not hasattr(self, "user_tree"):
+            return
+        for i in self.user_tree.get_children():
+            self.user_tree.delete(i)
+        status = self.u_status_sel.get() or None
+        search = self.u_search_var.get()
+        try:
+            rows = self.db.get_orders_for_user(self.user_id, status=status, search_text=search, limit=600)
+        except Exception:
+            # совместимость на случай старых db.py
+            rows = self.db.get_orders(status=status, search_text=search, limit=600)
+        for oid, dt, cust, st, total in rows:
+            self.user_tree.insert("", "end", values=(oid, dt, cust, st, f"{total:.2f}"))
+
+    def _reload_orders_admin(self):
+        if self.role != "admin" or not hasattr(self, "admin_tree"):
+            return
+        for i in self.admin_tree.get_children():
+            self.admin_tree.delete(i)
+        status = self.a_status_sel.get() or None
+        search = self.a_search_var.get()
+        for oid, dt, cust, st, total in self.db.get_orders(status=status, search_text=search, limit=600):
+            self.admin_tree.insert("", "end", values=(oid, dt, cust, st, f"{total:.2f}"))
+
+    # ----------------------------------------------------- details helpers
+    def _get_selected_id_from_tree(self, tree: ttk.Treeview) -> Optional[int]:
+        sel = tree.focus()
         if not sel:
             return None
-        return int(self.orders_tree.item(sel, "values")[0])
+        return int(tree.item(sel, "values")[0])
 
-    def _view_order_details(self):
-        oid = self._get_selected_order_id()
+    def _view_order_details_user(self):
+        oid = self._get_selected_id_from_tree(self.user_tree)
         if not oid:
             return
-        # Ожидается: get_order_items(order_id) -> ([(name, qty, price, subtotal)], total)
-        items, total = self.db.get_order_items(oid)
+        self._open_details_window(oid)
 
+    def _view_order_details_admin(self):
+        oid = self._get_selected_id_from_tree(self.admin_tree)
+        if not oid:
+            return
+        self._open_details_window(oid)
+
+    def _open_details_window(self, oid: int):
+        items, total = self.db.get_order_items(oid)
         win = tk.Toplevel(self)
         win.title(f"Order #{oid} details")
         win.geometry("560x380")
@@ -286,32 +424,28 @@ class MainApp(tk.Toplevel):
             .pack(anchor="e", padx=12, pady=(0, 10))
         tk.Button(win, text="Close", command=win.destroy).pack(pady=(0, 10))
 
-    def _advance_status(self):
-        oid = self._get_selected_order_id()
+    # ---------------------------------------------------------- admin actions
+    def _advance_status_admin(self):
+        oid = self._get_selected_id_from_tree(self.admin_tree)
         if not oid:
             return
-
-        st = self.orders_tree.item(self.orders_tree.focus(), "values")[3]
-        nexts = self.db.get_next_statuses(st)  # -> List[str]
+        st = self.admin_tree.item(self.admin_tree.focus(), "values")[3]
+        nexts = self.db.get_next_statuses(st)
         if not nexts:
             messagebox.showinfo("No action", f"Status '{st}' has no next steps.")
             return
-
-        choice = simpledialog.askstring(
-            "Next Status", f"Choose: {', '.join(nexts)}", parent=self
-        )
+        choice = simpledialog.askstring("Next Status", f"Choose: {', '.join(nexts)}", parent=self)
         if not choice or choice not in nexts:
             return
-
         try:
             self.db.update_order_status(oid, choice)
         except ValueError as e:
             messagebox.showerror("Error", str(e))
             return
-        self._reload_orders()
+        self._reload_orders_admin()
 
-    def _cancel_order(self):
-        oid = self._get_selected_order_id()
+    def _cancel_order_admin(self):
+        oid = self._get_selected_id_from_tree(self.admin_tree)
         if not oid:
             return
         if not messagebox.askyesno("Cancel", "Cancel this order?"):
@@ -321,13 +455,33 @@ class MainApp(tk.Toplevel):
         except ValueError as e:
             messagebox.showerror("Error", str(e))
             return
-        self._reload_orders()
+        self._reload_orders_admin()
 
-    # ---------- Admin Tab ----------
+    # ---------------------------------------------------------- user actions
+    def _user_cancel_order(self):
+        """Отмена заказа пользователем."""
+        if self.role != "user":
+            return
+        oid = self._get_selected_id_from_tree(self.user_tree)
+        if not oid:
+            return
+        if not messagebox.askyesno("Cancel", f"Cancel order #{oid}?"):
+            return
+        try:
+            # основной путь: специализированный метод БД с проверкой владельца/статуса
+            self.db.cancel_order_by_user(oid, self.user_id)
+        except AttributeError:
+            # если в db.py ещё нет метода — пробуем общий (не идеальный, но совместимость)
+            self.db.update_order_status(oid, "CANCELED")
+        except (ValueError, PermissionError) as e:
+            messagebox.showerror("Error", str(e))
+            return
+        messagebox.showinfo("Canceled", f"Order #{oid} canceled.")
+        self._reload_orders_user()
+
+    # ----------------------------------------------------------- Admin tab (UI)
     def _maybe_add_admin_tab(self):
-        code = simpledialog.askstring(
-            "Admin Access", "Enter admin access code:", show="*", parent=self
-        )
+        code = simpledialog.askstring("Admin Access", "Enter admin access code:", show="*", parent=self)
         if not code or not self.db.verify_admin_access(code):
             messagebox.showinfo("Access denied", "Admin area is locked.")
             return
@@ -340,8 +494,9 @@ class MainApp(tk.Toplevel):
 
         self._build_admin_menu_tab()
         self._build_admin_orders_tab()
+        self._build_admin_analytics_tab()  # ← новая вкладка Analytics
 
-    # -------- Admin / Menu management --------
+    # ------------------------------------------- Admin / Menu management (tab)
     def _build_admin_menu_tab(self):
         tab = tk.Frame(self.admin_nb)
         self.admin_nb.add(tab, text="Menu")
@@ -349,54 +504,41 @@ class MainApp(tk.Toplevel):
         left = tk.LabelFrame(tab, text="Item Editor")
         left.pack(side="left", fill="y", padx=10, pady=10)
 
-        # Категория для редактируемых позиций
         tk.Label(left, text="Category:").grid(row=0, column=0, sticky="w", padx=6, pady=(8, 2))
         self.admin_categories = self.db.get_categories()
         self.admin_cat_by_name = {name: cid for cid, name in self.admin_categories}
         self.admin_cat_sel = tk.StringVar()
         cat_names = [n for _, n in self.admin_categories]
-        self.admin_cat_combo = ttk.Combobox(
-            left, textvariable=self.admin_cat_sel, values=cat_names, state="readonly", width=22
-        )
+        self.admin_cat_combo = ttk.Combobox(left, textvariable=self.admin_cat_sel, values=cat_names,
+                                            state="readonly", width=22)
         self.admin_cat_combo.grid(row=1, column=0, padx=6, pady=(0, 6))
         self.admin_cat_combo.bind("<<ComboboxSelected>>", lambda e: self._admin_refresh_items())
 
-        # Управление категориями
-        addc = tk.Frame(left)
-        addc.grid(row=2, column=0, padx=6, pady=(0, 8), sticky="w")
+        addc = tk.Frame(left); addc.grid(row=2, column=0, padx=6, pady=(0, 8), sticky="w")
         tk.Button(addc, text="Add Category", command=self._admin_add_category).pack(side="left")
-        tk.Button(addc, text="Delete Category", command=self._admin_delete_category)\
-            .pack(side="left", padx=(6, 0))
+        tk.Button(addc, text="Delete Category", command=self._admin_delete_category).pack(side="left", padx=(6, 0))
 
-        # Поля позиции меню
         tk.Label(left, text="Item name:").grid(row=3, column=0, sticky="w", padx=6, pady=(6, 2))
         self.admin_item_name = tk.StringVar()
-        tk.Entry(left, textvariable=self.admin_item_name, width=24)\
-            .grid(row=4, column=0, padx=6, pady=(0, 6))
+        tk.Entry(left, textvariable=self.admin_item_name, width=24).grid(row=4, column=0, padx=6, pady=(0, 6))
 
         tk.Label(left, text="Price:").grid(row=5, column=0, sticky="w", padx=6, pady=(6, 2))
         self.admin_item_price = tk.DoubleVar(value=0.0)
-        tk.Entry(left, textvariable=self.admin_item_price, width=24)\
-            .grid(row=6, column=0, padx=6, pady=(0, 6))
+        tk.Entry(left, textvariable=self.admin_item_price, width=24).grid(row=6, column=0, padx=6, pady=(0, 6))
 
         self.admin_item_active = tk.IntVar(value=1)
         tk.Checkbutton(left, text="Active (available to order)", variable=self.admin_item_active)\
             .grid(row=7, column=0, sticky="w", padx=6, pady=(0, 6))
 
-        tk.Button(left, text="Add Item", command=self._admin_add_item)\
-            .grid(row=8, column=0, padx=6, pady=(4, 4))
+        tk.Button(left, text="Add Item", command=self._admin_add_item).grid(row=8, column=0, padx=6, pady=(4, 4))
         self.btn_admin_update = tk.Button(left, text="Update Item", state="disabled",
                                           command=self._admin_update_item)
         self.btn_admin_update.grid(row=9, column=0, padx=6, pady=(0, 4))
-        tk.Button(left, text="Clear", command=self._admin_clear_item_form)\
-            .grid(row=10, column=0, padx=6, pady=(0, 10))
+        tk.Button(left, text="Clear", command=self._admin_clear_item_form).grid(row=10, column=0, padx=6, pady=(0, 10))
 
-        # Список позиций
         right = tk.LabelFrame(tab, text="Items")
         right.pack(side="right", fill="both", expand=True, padx=10, pady=10)
-        self.admin_items_tree = ttk.Treeview(
-            right, columns=("ID", "Name", "Price", "Active"), show="headings"
-        )
+        self.admin_items_tree = ttk.Treeview(right, columns=("ID", "Name", "Price", "Active"), show="headings")
         for c in ("ID", "Name", "Price", "Active"):
             self.admin_items_tree.heading(c, text=c)
         self.admin_items_tree.column("ID", width=60, anchor="center")
@@ -411,24 +553,17 @@ class MainApp(tk.Toplevel):
         self._admin_refresh_items()
 
     def _admin_refresh_items(self):
-        """Обновить список позиций для выбранной категории (и синхронизировать левую вкладку Orders)."""
         for i in self.admin_items_tree.get_children():
             self.admin_items_tree.delete(i)
-
         cat = self.admin_cat_sel.get()
         if not cat:
             return
         cid = self.admin_cat_by_name[cat]
-
-        # Ожидается: get_menu_items(category_id=?, active_only=False)
-        # -> List[(item_id, name, price, category_id, is_active)]
         self.admin_items_cache = self.db.get_menu_items(category_id=cid, active_only=False)
         for iid, name, price, _cid, active in self.admin_items_cache:
-            self.admin_items_tree.insert(
-                "", "end", values=(iid, name, f"{price:.2f}", "Yes" if active else "No")
-            )
+            self.admin_items_tree.insert("", "end", values=(iid, name, f"{price:.2f}", "Yes" if active else "No"))
 
-        # Синхронизация вкладки Orders (категории и список)
+        # sync with user tab combobox too
         self.categories = self.db.get_categories()
         self.cat_id_by_name = {n: i for i, n in self.categories}
         self.cat_combo["values"] = [n for _, n in self.categories]
@@ -458,14 +593,12 @@ class MainApp(tk.Toplevel):
         if not name:
             return
         try:
-            # Ожидается: add_category(name) -> может бросить ValueError("CATEGORY_EXISTS")
             self.db.add_category(name.strip())
         except ValueError as e:
             if str(e) == "CATEGORY_EXISTS":
                 messagebox.showerror("Error", "Category already exists.")
                 return
             raise
-
         self.admin_categories = self.db.get_categories()
         self.admin_cat_by_name = {n: i for i, n in self.admin_categories}
         self.admin_cat_combo["values"] = [n for _, n in self.admin_categories]
@@ -477,19 +610,16 @@ class MainApp(tk.Toplevel):
         if not cat:
             return
         cid = self.admin_cat_by_name[cat]
-        if not messagebox.askyesno(
-            "Delete Category", f"Delete category '{cat}'? Items must be moved/deleted first."
-        ):
+        if not messagebox.askyesno("Delete Category",
+                                   f"Delete category '{cat}'? Items must be moved/deleted first."):
             return
         try:
-            # Ожидается: delete_category(category_id) -> ValueError("CATEGORY_IN_USE") если есть позиции
             self.db.delete_category(cid)
         except ValueError as e:
             if str(e) == "CATEGORY_IN_USE":
                 messagebox.showerror("Blocked", "Category has items. Move or delete them first.")
                 return
             raise
-
         self.admin_categories = self.db.get_categories()
         self.admin_cat_by_name = {n: i for i, n in self.admin_categories}
         names = [n for _, n in self.admin_categories]
@@ -511,16 +641,13 @@ class MainApp(tk.Toplevel):
         if not name or price < 0:
             messagebox.showerror("Invalid", "Enter name and non-negative price.")
             return
-
         try:
-            # Ожидается: add_menu_item(name, price, category_id, is_active) -> ValueError("NAME_TAKEN")
             self.db.add_menu_item(name, price, cid, bool(self.admin_item_active.get()))
         except ValueError as e:
             if str(e) == "NAME_TAKEN":
                 messagebox.showerror("Error", "An item with this name already exists.")
                 return
             raise
-
         self._admin_clear_item_form()
         self._admin_refresh_items()
 
@@ -535,23 +662,17 @@ class MainApp(tk.Toplevel):
         except Exception:
             messagebox.showerror("Error", "Price must be a number.")
             return
-
         try:
-            # Ожидается: update_menu_item(item_id, name, price, category_id, is_active)
-            #            -> ValueError("NAME_TAKEN") при дубле имени
-            self.db.update_menu_item(
-                self.editing_item_id, name, price, cid, bool(self.admin_item_active.get())
-            )
+            self.db.update_menu_item(self.editing_item_id, name, price, cid, bool(self.admin_item_active.get()))
         except ValueError as e:
             if str(e) == "NAME_TAKEN":
                 messagebox.showerror("Error", "Another item with this name already exists.")
                 return
             raise
-
         self._admin_clear_item_form()
         self._admin_refresh_items()
 
-    # -------- Admin / Orders management --------
+    # ------------------------------------------- Admin / Orders management (tab)
     def _build_admin_orders_tab(self):
         tab = tk.Frame(self.admin_nb)
         self.admin_nb.add(tab, text="Orders")
@@ -559,87 +680,56 @@ class MainApp(tk.Toplevel):
         filter_bar = tk.Frame(tab)
         filter_bar.pack(fill="x", padx=10, pady=(10, 0))
         tk.Label(filter_bar, text="Status:").pack(side="left")
-        self.admin_status_sel = tk.StringVar(value="")
-        ttk.Combobox(
-            filter_bar, textvariable=self.admin_status_sel,
-            values=["", "RECEIVED", "IN_PROGRESS", "READY", "COMPLETED", "CANCELED"],
-            width=14, state="readonly"
-        ).pack(side="left", padx=(4, 10))
+        self.admin_status_sel2 = tk.StringVar(value="")
+        ttk.Combobox(filter_bar, textvariable=self.admin_status_sel2,
+                     values=["", "RECEIVED", "IN_PROGRESS", "READY", "COMPLETED", "CANCELED"],
+                     width=14, state="readonly").pack(side="left", padx=(4, 10))
         tk.Label(filter_bar, text="Search:").pack(side="left")
-        self.admin_search_var = tk.StringVar()
-        tk.Entry(filter_bar, textvariable=self.admin_search_var, width=26)\
+        self.admin_search_var2 = tk.StringVar()
+        tk.Entry(filter_bar, textvariable=self.admin_search_var2, width=26)\
             .pack(side="left", padx=(4, 8))
-        tk.Button(filter_bar, text="Apply", command=self._admin_reload_orders)\
-            .pack(side="left")
+        tk.Button(filter_bar, text="Apply", command=self._admin_reload_orders_tab).pack(side="left")
 
         cols = ("ID", "Date", "Customer", "Status", "Total")
-        self.admin_orders_tree = ttk.Treeview(tab, columns=cols, show="headings")
+        self.admin_orders_tree2 = ttk.Treeview(tab, columns=cols, show="headings")
         for c in cols:
-            self.admin_orders_tree.heading(c, text=c)
-        self.admin_orders_tree.column("ID", width=70, anchor="center")
-        self.admin_orders_tree.column("Date", width=150)
-        self.admin_orders_tree.column("Customer", width=220)
-        self.admin_orders_tree.column("Status", width=120, anchor="center")
-        self.admin_orders_tree.column("Total", width=90, anchor="e")
-        self.admin_orders_tree.pack(fill="both", expand=True, padx=10, pady=10)
-        self.admin_orders_tree.bind("<Double-1>", lambda e: self._view_order_details_admin())
+            self.admin_orders_tree2.heading(c, text=c)
+        self.admin_orders_tree2.column("ID", width=70, anchor="center")
+        self.admin_orders_tree2.column("Date", width=150)
+        self.admin_orders_tree2.column("Customer", width=220)
+        self.admin_orders_tree2.column("Status", width=120, anchor="center")
+        self.admin_orders_tree2.column("Total", width=90, anchor="e")
+        self.admin_orders_tree2.pack(fill="both", expand=True, padx=10, pady=10)
+        self.admin_orders_tree2.bind("<Double-1>", lambda e: self._view_order_details_admin_tab())
 
         btns = tk.Frame(tab)
         btns.pack(fill="x", padx=10, pady=(0, 10))
-        tk.Button(btns, text="Details", command=self._view_order_details_admin).pack(side="left")
-        tk.Button(btns, text="Advance", command=self._admin_advance_status).pack(side="left", padx=6)
-        tk.Button(btns, text="Cancel", command=self._admin_cancel_order).pack(side="left")
-        tk.Button(btns, text="Refresh", command=self._admin_reload_orders).pack(side="right")
+        tk.Button(btns, text="Details", command=self._view_order_details_admin_tab).pack(side="left")
+        tk.Button(btns, text="Advance", command=self._admin_advance_status_tab).pack(side="left", padx=6)
+        tk.Button(btns, text="Cancel", command=self._admin_cancel_order_tab).pack(side="left")
+        tk.Button(btns, text="Refresh", command=self._admin_reload_orders_tab).pack(side="right")
 
-        self._admin_reload_orders()
+        self._admin_reload_orders_tab()
 
-    def _admin_reload_orders(self):
-        for i in self.admin_orders_tree.get_children():
-            self.admin_orders_tree.delete(i)
-        status = self.admin_status_sel.get() or None
-        search = self.admin_search_var.get()
+    def _admin_reload_orders_tab(self):
+        for i in self.admin_orders_tree2.get_children():
+            self.admin_orders_tree2.delete(i)
+        status = self.admin_status_sel2.get() or None
+        search = self.admin_search_var2.get()
         for oid, dt, cust, st, total in self.db.get_orders(status=status, search_text=search, limit=600):
-            self.admin_orders_tree.insert("", "end", values=(oid, dt, cust, st, f"{total:.2f}"))
+            self.admin_orders_tree2.insert("", "end", values=(oid, dt, cust, st, f"{total:.2f}"))
 
-    def _view_order_details_admin(self):
-        sel = self.admin_orders_tree.focus()
-        if not sel:
-            return
-        oid = int(self.admin_orders_tree.item(sel, "values")[0])
-        items, total = self.db.get_order_items(oid)
-
-        win = tk.Toplevel(self)
-        win.title(f"Order #{oid}")
-        win.geometry("560x380")
-        win.transient(self)
-        win.grab_set()
-
-        cols = ("Item", "Qty", "Price", "Subtotal")
-        tv = ttk.Treeview(win, columns=cols, show="headings")
-        for c in cols:
-            tv.heading(c, text=c)
-        tv.column("Item", width=240)
-        tv.column("Qty", width=60, anchor="center")
-        tv.column("Price", width=100, anchor="e")
-        tv.column("Subtotal", width=120, anchor="e")
-        tv.pack(fill="both", expand=True, padx=10, pady=10)
-        for name, qty, price, sub in items:
-            tv.insert("", "end", values=(name, qty, f"{price:.2f}", f"{sub:.2f}"))
-        tk.Label(win, text=f"Total: {total:.2f}", font=("Segoe UI", 11, "bold"))\
-            .pack(anchor="e", padx=12, pady=(0, 10))
-        tk.Button(win, text="Close", command=win.destroy).pack(pady=(0, 10))
-
-    def _admin_selected_order(self) -> Tuple[int, str]:
-        sel = self.admin_orders_tree.focus()
-        if not sel:
-            return 0, ""
-        vals = self.admin_orders_tree.item(sel, "values")
-        return int(vals[0]), vals[3]
-
-    def _admin_advance_status(self):
-        oid, st = self._admin_selected_order()
+    def _view_order_details_admin_tab(self):
+        oid = self._get_selected_id_from_tree(self.admin_orders_tree2)
         if not oid:
             return
+        self._open_details_window(oid)
+
+    def _admin_advance_status_tab(self):
+        oid = self._get_selected_id_from_tree(self.admin_orders_tree2)
+        if not oid:
+            return
+        st = self.admin_orders_tree2.item(self.admin_orders_tree2.focus(), "values")[3]
         nexts = self.db.get_next_statuses(st)
         if not nexts:
             messagebox.showinfo("No action", f"'{st}' has no next steps.")
@@ -652,10 +742,10 @@ class MainApp(tk.Toplevel):
         except ValueError as e:
             messagebox.showerror("Error", str(e))
             return
-        self._admin_reload_orders()
+        self._admin_reload_orders_tab()
 
-    def _admin_cancel_order(self):
-        oid, _st = self._admin_selected_order()
+    def _admin_cancel_order_tab(self):
+        oid = self._get_selected_id_from_tree(self.admin_orders_tree2)
         if not oid:
             return
         if not messagebox.askyesno("Cancel", f"Cancel order #{oid}?"):
@@ -665,9 +755,210 @@ class MainApp(tk.Toplevel):
         except ValueError as e:
             messagebox.showerror("Error", str(e))
             return
-        self._admin_reload_orders()
+        self._admin_reload_orders_tab()
 
-    # ---------- Account ----------
+    # ------------------------------------------------------ Admin / Analytics
+    def _build_admin_analytics_tab(self):
+        tab = tk.Frame(self.admin_nb)
+        self.admin_nb.add(tab, text="Analytics")
+
+        # ---- Фильтры
+        filters = tk.LabelFrame(tab, text="Filters")
+        filters.pack(fill="x", padx=10, pady=(10, 6))
+
+        today = datetime.now().date()
+        start_default = today.replace(day=1).strftime("%Y-%m-%d")
+        end_default = today.strftime("%Y-%m-%d")
+
+        tk.Label(filters, text="From (YYYY-MM-DD):").pack(side="left", padx=(8, 4))
+        self.an_start_var = tk.StringVar(value=start_default)
+        tk.Entry(filters, textvariable=self.an_start_var, width=12).pack(side="left")
+        tk.Label(filters, text="To (YYYY-MM-DD):").pack(side="left", padx=(10, 4))
+        self.an_end_var = tk.StringVar(value=end_default)
+        tk.Entry(filters, textvariable=self.an_end_var, width=12).pack(side="left")
+
+        tk.Label(filters, text="Statuses:").pack(side="left", padx=(16, 4))
+        self.an_status_list = tk.Listbox(filters, height=5, exportselection=False, selectmode="multiple")
+        try:
+            statuses = self.db.get_status_list()
+        except Exception:
+            statuses = ["RECEIVED", "IN_PROGRESS", "READY", "COMPLETED", "CANCELED"]
+        for s in statuses:
+            self.an_status_list.insert(tk.END, s)
+        self.an_status_list.pack(side="left", padx=(0, 10))
+
+        tk.Button(filters, text="Run", command=self._run_analytics).pack(side="left", padx=(4, 2))
+        tk.Button(filters, text="Export Orders CSV", command=self._export_orders_csv).pack(side="left", padx=(4, 2))
+        tk.Button(filters, text="Export Top Items CSV", command=self._export_top_items_csv).pack(side="left", padx=(4, 2))
+
+        # ---- Сводка
+        summary = tk.LabelFrame(tab, text="Summary")
+        summary.pack(fill="x", padx=10, pady=(0, 6))
+        self.sum_orders_var = tk.StringVar(value="0")
+        self.sum_revenue_var = tk.StringVar(value="0.00")
+        self.sum_avg_var = tk.StringVar(value="0.00")
+
+        tk.Label(summary, text="Orders:").pack(side="left", padx=(10, 4))
+        tk.Label(summary, textvariable=self.sum_orders_var, font=("Segoe UI", 10, "bold")).pack(side="left")
+
+        tk.Label(summary, text="   Revenue:").pack(side="left", padx=(20, 4))
+        tk.Label(summary, textvariable=self.sum_revenue_var, font=("Segoe UI", 10, "bold")).pack(side="left")
+
+        tk.Label(summary, text="   Avg order:").pack(side="left", padx=(20, 4))
+        tk.Label(summary, textvariable=self.sum_avg_var, font=("Segoe UI", 10, "bold")).pack(side="left")
+
+        # ---- Таблицы
+        split = tk.PanedWindow(tab, sashrelief="sunken")
+        split.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        # Заказы
+        left = tk.LabelFrame(split, text="Orders")
+        cols_o = ("ID", "Date", "Customer", "Status", "Service", "Total")
+        self.an_orders_tree = ttk.Treeview(left, columns=cols_o, show="headings")
+        for c in cols_o:
+            self.an_orders_tree.heading(c, text=c)
+        self.an_orders_tree.column("ID", width=70, anchor="center")
+        self.an_orders_tree.column("Date", width=150)
+        self.an_orders_tree.column("Customer", width=200)
+        self.an_orders_tree.column("Status", width=120, anchor="center")
+        self.an_orders_tree.column("Service", width=100, anchor="center")
+        self.an_orders_tree.column("Total", width=100, anchor="e")
+        self.an_orders_tree.pack(fill="both", expand=True, padx=6, pady=6)
+
+        # ТОП-блюда
+        right = tk.LabelFrame(split, text="Top Items")
+        cols_i = ("Item", "Qty", "Revenue")
+        self.an_items_tree = ttk.Treeview(right, columns=cols_i, show="headings")
+        for c in cols_i:
+            self.an_items_tree.heading(c, text=c)
+        self.an_items_tree.column("Item", width=260)
+        self.an_items_tree.column("Qty", width=80, anchor="center")
+        self.an_items_tree.column("Revenue", width=120, anchor="e")
+        self.an_items_tree.pack(fill="both", expand=True, padx=6, pady=6)
+
+        split.add(left)
+        split.add(right)
+
+        # первый запуск
+        self._run_analytics()
+
+    def _parse_period(self) -> Optional[Tuple[str, str]]:
+        """Возвращает (start_dt, end_dt) в формате 'YYYY-MM-DD HH:MM:SS' (вкл. конец дня)."""
+        try:
+            start = datetime.strptime(self.an_start_var.get().strip(), "%Y-%m-%d")
+            end = datetime.strptime(self.an_end_var.get().strip(), "%Y-%m-%d")
+            if end < start:
+                raise ValueError
+            end_dt = end + timedelta(days=1) - timedelta(seconds=1)
+            return start.strftime("%Y-%m-%d %H:%M:%S"), end_dt.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            messagebox.showerror("Invalid period", "Use YYYY-MM-DD for dates and ensure From ≤ To.")
+            return None
+
+    def _selected_statuses(self) -> Optional[List[str]]:
+        sel = [self.an_status_list.get(i) for i in self.an_status_list.curselection()]
+        return sel or None
+
+    def _run_analytics(self):
+        period = self._parse_period()
+        if not period:
+            return
+        start_dt, end_dt = period
+        statuses = self._selected_statuses()
+
+        # очистить таблицы
+        for t in (self.an_orders_tree, self.an_items_tree):
+            for i in t.get_children():
+                t.delete(i)
+
+        # заказы
+        try:
+            orders = self.db.report_orders(start_dt, end_dt, statuses=statuses)
+        except AttributeError:
+            # fallback через общий метод (без периода)
+            orders = self.db.get_orders(status=None, search_text="", limit=1000)
+            orders = [(oid, dt, cust, st, "", total) for (oid, dt, cust, st, total) in orders]
+
+        total_revenue = 0.0
+        for oid, dt, cust, st, service, total in orders:
+            total_revenue += float(total)
+            self.an_orders_tree.insert("", "end",
+                                       values=(oid, dt, cust, st, service or "", f"{float(total):.2f}"))
+
+        count = len(orders)
+        avg = (total_revenue / count) if count else 0.0
+        self.sum_orders_var.set(str(count))
+        self.sum_revenue_var.set(f"{total_revenue:.2f}")
+        self.sum_avg_var.set(f"{avg:.2f}")
+
+        # топ-блюда
+        try:
+            items = self.db.report_top_items(start_dt, end_dt, statuses=statuses, limit=20)
+        except AttributeError:
+            items = []
+        for name, qty, revenue in items:
+            self.an_items_tree.insert("", "end", values=(name, int(qty), f"{float(revenue):.2f}"))
+
+    def _export_orders_csv(self):
+        period = self._parse_period()
+        if not period:
+            return
+        start_dt, end_dt = period
+        statuses = self._selected_statuses()
+
+        path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv")],
+            title="Save Orders CSV",
+            initialfile="orders_report.csv",
+        )
+        if not path:
+            return
+
+        try:
+            rows = self.db.report_orders(start_dt, end_dt, statuses=statuses)
+        except AttributeError:
+            rows = self.db.get_orders(status=None, search_text="", limit=1000)
+            rows = [(oid, dt, cust, st, "", total) for (oid, dt, cust, st, total) in rows]
+
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["OrderID", "Date", "Customer", "Status", "ServiceType", "Total"])
+            for oid, dt, cust, st, service, total in rows:
+                w.writerow([oid, dt, cust, st, service or "", f"{float(total):.2f}"])
+
+        messagebox.showinfo("Export", "Orders CSV saved.")
+
+    def _export_top_items_csv(self):
+        period = self._parse_period()
+        if not period:
+            return
+        start_dt, end_dt = period
+        statuses = self._selected_statuses()
+
+        path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv")],
+            title="Save Top Items CSV",
+            initialfile="top_items.csv",
+        )
+        if not path:
+            return
+
+        try:
+            items = self.db.report_top_items(start_dt, end_dt, statuses=statuses, limit=1000)
+        except AttributeError:
+            items = []
+
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["Item", "Qty", "Revenue"])
+            for name, qty, revenue in items:
+                w.writerow([name, int(qty), f"{float(revenue):.2f}"])
+
+        messagebox.showinfo("Export", "Top Items CSV saved.")
+
+    # --------------------------------------------------------------- account ops
     def _change_password(self):
         old = simpledialog.askstring("Change Password", "Current password:", show="*", parent=self)
         if old is None:
@@ -678,9 +969,11 @@ class MainApp(tk.Toplevel):
         new2 = simpledialog.askstring("Change Password", "Repeat new password:", show="*", parent=self)
         if new2 is None:
             return
+
         if len(new1) < 6 or new1 != new2:
             messagebox.showerror("Error", "Passwords must match and be ≥ 6 chars.")
             return
+
         try:
             self.db.change_user_password(self.user_id, old, new1)
             messagebox.showinfo("Done", "Password changed.")
@@ -705,7 +998,7 @@ class MainApp(tk.Toplevel):
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
-    # ---------- lifecycle ----------
+    # ---------------------------------------------------------------- lifecycle
     def _logout(self):
         try:
             self.on_logout()

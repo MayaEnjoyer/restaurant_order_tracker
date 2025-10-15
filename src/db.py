@@ -7,11 +7,9 @@ import mysql.connector
 from dotenv import load_dotenv
 from mysql.connector.errors import IntegrityError, Error as MySQLError
 
-# Загружаем .env (реквизиты БД и т.п.)
 load_dotenv()
 
-# Типы для ясности
-OrderRow = Tuple[int, str, str, str, float]  # (order_id, date, customer, status_code, total)
+OrderRow = Tuple[int, str, str, str, float]
 
 
 class DatabaseManager:
@@ -23,10 +21,9 @@ class DatabaseManager:
       - OrderStatusRef (RECEIVED, IN_PROGRESS, READY, COMPLETED, CANCELED)
       - Orders (status_code, notes, user_id, service_type, delivery_address)
       - OrderItems (price_at_order — "снимок" цены на момент заказа)
-      - AppSettings (в т.ч. admin_access_code_hash)
+      - AppSettings (admin/chef/courier access codes в хешах)
     """
 
-    # Допустимые переходы статусов
     STATUS_FLOW: Dict[str, List[str]] = {
         "RECEIVED":    ["IN_PROGRESS", "CANCELED"],
         "IN_PROGRESS": ["READY", "CANCELED"],
@@ -287,6 +284,7 @@ class DatabaseManager:
         self._bootstrap_statuses()
         self._bootstrap_categories()
         self._bootstrap_admin_access_code()
+        self._bootstrap_staff_access_codes()  # chef/courier codes
 
         # ----- view & indices -----
         self._create_or_replace_view(
@@ -349,13 +347,37 @@ class DatabaseManager:
             )
             self.conn.commit()
 
+    def _bootstrap_staff_access_codes(self) -> None:
+        # CHEF
+        self.cur.execute("SELECT setting_value FROM AppSettings WHERE setting_key='chef_access_code_hash'")
+        if not self.cur.fetchone():
+            raw = os.getenv("CHEF_ACCESS_CODE", "CHEF123")
+            hashed = bcrypt.hashpw(raw.encode(), bcrypt.gensalt()).decode()
+            self.cur.execute(
+                "INSERT INTO AppSettings (setting_key, setting_value) VALUES ('chef_access_code_hash', %s)",
+                (hashed,),
+            )
+            self.conn.commit()
+        # COURIER
+        self.cur.execute("SELECT setting_value FROM AppSettings WHERE setting_key='courier_access_code_hash'")
+        if not self.cur.fetchone():
+            raw = os.getenv("COURIER_ACCESS_CODE", "COURIER123")
+            hashed = bcrypt.hashpw(raw.encode(), bcrypt.gensalt()).decode()
+            self.cur.execute(
+                "INSERT INTO AppSettings (setting_key, setting_value) VALUES ('courier_access_code_hash', %s)",
+                (hashed,),
+            )
+            self.conn.commit()
+
     # ---------- auth / users ----------
     def authenticate_user(self, username: str, password: str) -> Optional[Tuple[int, str, str]]:
         self.cur.execute(
             "SELECT user_id, username, password_hash, role FROM Users WHERE username=%s",
             (username,),
         )
-        row = self.cur.fetchone()
+        row = self.cur.fetchone
+        if callable(row):
+            row = row()
         if not row:
             return None
         user_id, uname, pw_hash, role = row
@@ -404,10 +426,20 @@ class DatabaseManager:
         self.cur.execute("UPDATE Users SET password_hash=%s WHERE user_id=%s", (new_hash, int(user_id)))
         self.conn.commit()
 
-    def verify_admin_access(self, code: str) -> bool:
-        self.cur.execute("SELECT setting_value FROM AppSettings WHERE setting_key='admin_access_code_hash'")
+    # ---------- role access codes ----------
+    def _verify_code_by_key(self, key: str, code: str) -> bool:
+        self.cur.execute("SELECT setting_value FROM AppSettings WHERE setting_key=%s", (key,))
         row = self.cur.fetchone()
         return bool(row and bcrypt.checkpw(code.encode(), row[0].encode()))
+
+    def verify_admin_access(self, code: str) -> bool:
+        return self._verify_code_by_key("admin_access_code_hash", code)
+
+    def verify_chef_access(self, code: str) -> bool:
+        return self._verify_code_by_key("chef_access_code_hash", code)
+
+    def verify_courier_access(self, code: str) -> bool:
+        return self._verify_code_by_key("courier_access_code_hash", code)
 
     def change_admin_access_code(self, requester_role: str, new_code: str) -> None:
         if requester_role != "admin":
@@ -706,6 +738,42 @@ class DatabaseManager:
             raise ValueError("CANNOT_CANCEL_THIS_STATUS")
         self.cur.execute("UPDATE Orders SET status_code='CANCELED' WHERE order_id=%s", (int(order_id),))
         self.conn.commit()
+
+    # ---------- courier view ----------
+    def get_delivery_orders(
+        self,
+        status: Optional[str] = None,
+        search_text: str = "",
+        limit: int = 400,
+    ) -> List[Tuple[int, str, str, str, float, str]]:
+        """
+        Заказы типа DELIVERY (для курьера):
+        -> [(order_id, date, customer, status, total, delivery_address)]
+        """
+        sql = """
+        SELECT o.order_id,
+               DATE_FORMAT(o.order_date, '%Y-%m-%d %H:%i'),
+               COALESCE(o.customer_name,''),
+               o.status_code,
+               COALESCE(v.total,0),
+               COALESCE(o.delivery_address,'')
+        FROM Orders o
+        LEFT JOIN v_order_totals v ON v.order_id = o.order_id
+        WHERE o.service_type='DELIVERY'
+        """
+        params: List[Union[str, int]] = []
+        if status:
+            sql += " AND o.status_code=%s"
+            params.append(status)
+        if search_text:
+            like = f"%{search_text.strip()}%"
+            sql += " AND (o.customer_name LIKE %s OR o.customer_contact LIKE %s OR o.notes LIKE %s OR o.delivery_address LIKE %s)"
+            params += [like, like, like, like]
+        sql += " ORDER BY o.order_date DESC LIMIT %s"
+        params.append(int(limit))
+        self.cur.execute(sql, tuple(params))
+        rows = self.cur.fetchall()
+        return [(int(r[0]), r[1], r[2], r[3], float(r[4]), r[5]) for r in rows]
 
     # ---------- analytics ----------
     def get_status_list(self) -> List[str]:

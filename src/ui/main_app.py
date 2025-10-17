@@ -1229,7 +1229,6 @@ class MainApp(tk.Toplevel):
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
-    # ---------------------------------------------------------------- lifecycle
     def _logout(self):
         try:
             self.on_logout()

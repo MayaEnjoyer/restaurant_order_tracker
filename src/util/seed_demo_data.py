@@ -152,7 +152,6 @@ def upsert_item(name: str, price: float, category_id: int, is_active: bool = Tru
         )
     cnx.commit()
 
-# ---------- 5) ДЕМО-ДАННЫЕ ----------
 cats = {
     "General": upsert_category("General"),
     "Pizza": upsert_category("Pizza"),

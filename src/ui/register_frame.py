@@ -3,10 +3,7 @@ from tkinter import messagebox
 
 
 class RegisterFrame(tk.Frame):
-    """
-    Registration form for regular users (role='user').
-    On success: calls on_go_login() to return to Login.
-    """
+
     def __init__(self, master, db_manager, on_go_login):
         super().__init__(master)
         self.db = db_manager

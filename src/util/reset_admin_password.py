@@ -1,10 +1,9 @@
-# src/util/reset_admin_password.py
 import os
 import bcrypt
 import mysql.connector
 from dotenv import load_dotenv
 
-load_dotenv()  # возьмёт DB_HOST/PORT/USER/PASSWORD/NAME из .env, если он есть
+load_dotenv()
 
 cnx = mysql.connector.connect(
     host=os.getenv("DB_HOST", "127.0.0.1"),

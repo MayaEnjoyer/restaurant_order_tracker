@@ -1,4 +1,3 @@
-# src/util/seed_demo_data.py
 import os
 import mysql.connector
 from dotenv import load_dotenv
@@ -56,10 +55,8 @@ def referenced_category_table_from_fk() -> str | None:
     row = cur.fetchone()
     return row[0] if row else None
 
-# ---------- 1) Определяем / создаём таблицу категорий ----------
 cat_table = referenced_category_table_from_fk()
 if not cat_table:
-    # если FK не найден, выбираем приоритетно MenuCategories, иначе Categories, иначе создаём MenuCategories
     if table_exists("MenuCategories"):
         cat_table = "MenuCategories"
     elif table_exists("Categories"):
@@ -73,7 +70,6 @@ if not cat_table:
         )
         """)
 
-# если выбранной таблицы нет — создадим
 if not table_exists(cat_table):
     exec_ddl(f"""
     CREATE TABLE {cat_table} (
@@ -82,7 +78,6 @@ if not table_exists(cat_table):
     )
     """)
 
-# ---------- 2) Гарантируем колонки в MenuItems ----------
 if not column_exists("MenuItems", "is_active"):
     exec_ddl("ALTER TABLE MenuItems ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1")
 if not column_exists("MenuItems", "category_id"):
@@ -92,8 +87,6 @@ if not column_exists("MenuItems", "category_id"):
 if not index_exists("MenuItems", "idx_menuitems_active"):
     exec_ddl("CREATE INDEX idx_menuitems_active ON MenuItems (is_active, category_id)")
 
-# ---------- 3) Гарантируем FK MenuItems -> <cat_table> ----------
-# Сначала убедимся, что существует хотя бы одна категория 'General'
 cur.execute(f"SELECT category_id FROM {cat_table} WHERE name='General'")
 row = cur.fetchone()
 if not row:
@@ -102,10 +95,8 @@ if not row:
     row = cur.fetchone()
 general_id = int(row[0])
 
-# Заполним NULL category_id у существующих товаров
 exec_ddl(f"UPDATE MenuItems SET category_id={general_id} WHERE category_id IS NULL")
 
-# Если уже есть какой-то FK — оставляем. Если нет — добавим.
 cur.execute(
     "SELECT COUNT(*) FROM information_schema.KEY_COLUMN_USAGE "
     "WHERE table_schema = DATABASE() "
@@ -116,7 +107,6 @@ cur.execute(
 has_fk = cur.fetchone()[0] > 0
 
 if not has_fk:
-    # имя FK используем единообразное
     try:
         exec_ddl(f"""
         ALTER TABLE MenuItems
@@ -125,9 +115,8 @@ if not has_fk:
           ON DELETE RESTRICT
         """)
     except mysql.connector.Error:
-        pass  # если вдруг параллельно уже создали
+        pass
 
-# ---------- 4) UPSERT-утилиты ----------
 def upsert_category(name: str) -> int:
     cur.execute(f"SELECT category_id FROM {cat_table} WHERE name=%s", (name,))
     row = cur.fetchone()

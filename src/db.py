@@ -11,18 +11,7 @@ load_dotenv()
 
 OrderRow = Tuple[int, str, str, str, float]
 
-
 class DatabaseManager:
-    """
-    Доступ к MySQL + миграции.
-    Таблицы:
-      - Users (единственный admin + обычные пользователи)
-      - MenuCategories, MenuItems (с is_active)
-      - OrderStatusRef (RECEIVED, IN_PROGRESS, READY, COMPLETED, CANCELED)
-      - Orders (status_code, notes, user_id, service_type, delivery_address)
-      - OrderItems (price_at_order — "снимок" цены на момент заказа)
-      - AppSettings (admin/chef/courier access codes в хешах)
-    """
 
     STATUS_FLOW: Dict[str, List[str]] = {
         "RECEIVED":    ["IN_PROGRESS", "CANCELED"],
@@ -32,7 +21,7 @@ class DatabaseManager:
         "CANCELED":    [],
     }
 
-    # ---------- lifecycle ----------
+    # lifecycle
     def __init__(self):
         self.conn = mysql.connector.connect(
             host=os.getenv("DB_HOST", "127.0.0.1"),
@@ -42,7 +31,7 @@ class DatabaseManager:
             database=os.getenv("DB_NAME", "restaurant"),
             auth_plugin="mysql_native_password",
         )
-        # buffered=True — можно безопасно переиспользовать курсор
+        # buffered=True
         self.cur = self.conn.cursor(buffered=True)
         self.current_user_id: Optional[int] = None
         self._ensure_schema()
@@ -61,7 +50,7 @@ class DatabaseManager:
         except Exception:
             pass
 
-    # ---------- helpers ----------
+    # helpers
     def _column_exists(self, table: str, column: str) -> bool:
         self.cur.execute(
             """
@@ -93,12 +82,11 @@ class DatabaseManager:
         self.conn.commit()
 
     def _add_column_if_missing(self, table: str, column: str, ddl_sql: str) -> None:
-        """Удобный помощник для миграций."""
         if not self._column_exists(table, column):
             self.cur.execute(f"ALTER TABLE {table} ADD COLUMN {ddl_sql}")
             self.conn.commit()
 
-    # ---------- schema & migrations ----------
+    # schema & migrations
     def _ensure_schema(self) -> None:
         # Users
         self.cur.execute(
@@ -122,7 +110,7 @@ class DatabaseManager:
             """
         )
 
-        # MenuItems (новая схема — с category_id и is_active)
+        # MenuItems
         self.cur.execute(
             """
             CREATE TABLE IF NOT EXISTS MenuItems (
@@ -137,7 +125,7 @@ class DatabaseManager:
             """
         )
 
-        # Справочник статусов
+        # Directory of statuses
         self.cur.execute(
             """
             CREATE TABLE IF NOT EXISTS OrderStatusRef (
@@ -168,7 +156,7 @@ class DatabaseManager:
             """
         )
 
-        # OrderItems (с "снимком" цены)
+        # OrderItems
         self.cur.execute(
             """
             CREATE TABLE IF NOT EXISTS OrderItems (
@@ -185,7 +173,7 @@ class DatabaseManager:
             """
         )
 
-        # Настройки
+        # Settings
         self.cur.execute(
             """
             CREATE TABLE IF NOT EXISTS AppSettings (
@@ -196,9 +184,9 @@ class DatabaseManager:
         )
         self.conn.commit()
 
-        # ----- MIGRATIONS -----
+        # MIGRATIONS
 
-        # 1) Гарантируем наличие категории General
+        # 1) Availability of the General category
         self.cur.execute("SELECT category_id FROM MenuCategories WHERE name=%s", ("General",))
         r = self.cur.fetchone()
         if r:
@@ -244,7 +232,7 @@ class DatabaseManager:
             )
             self.conn.commit()
 
-        # 5) Orders.status_code (миграция со старого поля status)
+        # 5) Orders.status_code
         if not self._column_exists("Orders", "status_code"):
             self.cur.execute(
                 "ALTER TABLE Orders ADD COLUMN status_code VARCHAR(20) NOT NULL DEFAULT 'RECEIVED' AFTER order_date"
@@ -267,7 +255,7 @@ class DatabaseManager:
         # 6) Orders.notes
         self._add_column_if_missing("Orders", "notes", "notes VARCHAR(255)")
 
-        # 7) Тип обслуживания и адрес доставки
+        # 7) Service type and delivery address
         self._add_column_if_missing(
             "Orders",
             "service_type",
@@ -279,14 +267,12 @@ class DatabaseManager:
             "delivery_address VARCHAR(255) NULL",
         )
 
-        # ----- seed -----
         self._bootstrap_admin()
         self._bootstrap_statuses()
         self._bootstrap_categories()
         self._bootstrap_admin_access_code()
         self._bootstrap_staff_access_codes()  # chef/courier codes
 
-        # ----- view & indices -----
         self._create_or_replace_view(
             "v_order_totals",
             """
@@ -300,7 +286,7 @@ class DatabaseManager:
         self._create_index_if_missing("Orders", "idx_orders_user_date", "(user_id, order_date)")
         self._create_index_if_missing("MenuItems", "idx_menuitems_active", "(is_active, category_id)")
 
-    # ---------- bootstrap ----------
+    # bootstrap
     def _bootstrap_admin(self) -> None:
         self.cur.execute("SELECT COUNT(*) FROM Users WHERE role='admin'")
         if self.cur.fetchone()[0] == 0:
@@ -369,7 +355,7 @@ class DatabaseManager:
             )
             self.conn.commit()
 
-    # ---------- auth / users ----------
+    # auth/users
     def authenticate_user(self, username: str, password: str) -> Optional[Tuple[int, str, str]]:
         self.cur.execute(
             "SELECT user_id, username, password_hash, role FROM Users WHERE username=%s",
@@ -386,7 +372,6 @@ class DatabaseManager:
         return None
 
     def authenticate_admin_password(self, password: str) -> Optional[Tuple[int, str, str]]:
-        """Вход админа только по паролю (username не спрашиваем)."""
         self.cur.execute("SELECT user_id, password_hash FROM Users WHERE role='admin' ORDER BY user_id LIMIT 1")
         row = self.cur.fetchone()
         if not row:
@@ -426,7 +411,7 @@ class DatabaseManager:
         self.cur.execute("UPDATE Users SET password_hash=%s WHERE user_id=%s", (new_hash, int(user_id)))
         self.conn.commit()
 
-    # ---------- role access codes ----------
+    # role access codes
     def _verify_code_by_key(self, key: str, code: str) -> bool:
         self.cur.execute("SELECT setting_value FROM AppSettings WHERE setting_key=%s", (key,))
         row = self.cur.fetchone()
@@ -451,7 +436,7 @@ class DatabaseManager:
         )
         self.conn.commit()
 
-    # ---------- categories ----------
+    # categories
     def get_categories(self) -> List[Tuple[int, str]]:
         self.cur.execute("SELECT category_id, name FROM MenuCategories ORDER BY name")
         return [(int(r[0]), r[1]) for r in self.cur.fetchall()]
@@ -475,11 +460,10 @@ class DatabaseManager:
                 raise ValueError("CATEGORY_IN_USE")
             raise
 
-    # ---------- menu ----------
+    # menu
     def get_menu_items(
         self, category_id: Optional[int] = None, active_only: bool = True
     ) -> List[Tuple[int, str, float, int, bool]]:
-        """Возвращает [(item_id, name, price, category_id, is_active), ...]"""
         sql = "SELECT item_id, name, price, category_id, is_active FROM MenuItems WHERE 1=1"
         params: List[Union[int, str]] = []
         if category_id is not None:
@@ -536,12 +520,11 @@ class DatabaseManager:
             raise
 
     def get_item_id_by_name(self, name: str) -> Optional[int]:
-        """Найти item_id по точному имени (активность не важна)."""
         self.cur.execute("SELECT item_id FROM MenuItems WHERE name=%s LIMIT 1", (name,))
         r = self.cur.fetchone()
         return int(r[0]) if r else None
 
-    # ---------- orders ----------
+    # orders
     def create_order(
         self,
         customer_name: str,
@@ -551,17 +534,11 @@ class DatabaseManager:
         service_type: Optional[str] = None,
         delivery_address: Optional[str] = None,
     ) -> int:
-        """
-        Создаёт заказ и его позиции.
-        items: [(item_id, qty), ...]
-        Для каждой позиции фиксируем текущую цену (price_at_order).
-        """
         if self.current_user_id is None:
             raise RuntimeError("No current user set before creating orders.")
 
         stype = service_type or "TAKEAWAY"
         if not self._column_exists("Orders", "service_type"):
-            # Совместимость со старыми БД — пишем тип обслуживания в notes
             extra = f" | Service: {stype}"
             if delivery_address:
                 extra += f" | Delivery address: {delivery_address}"
@@ -599,12 +576,6 @@ class DatabaseManager:
         return order_id
 
     def replace_order_items(self, order_id: int, items: Sequence[Tuple[int, int]], requester_user_id: int) -> None:
-        """
-        Полностью заменить позиции заказа.
-        Разрешено только:
-          - если заказ принадлежит requester_user_id
-          - и находится в статусе RECEIVED
-        """
         self.cur.execute("SELECT user_id, status_code FROM Orders WHERE order_id=%s", (int(order_id),))
         row = self.cur.fetchone()
         if not row:
@@ -629,7 +600,6 @@ class DatabaseManager:
         self.conn.commit()
 
     def get_orders(self, status: Optional[str] = None, search_text: str = "", limit: int = 200) -> List[OrderRow]:
-        """Возвращает заказы (сумма приходит из вью v_order_totals)."""
         sql = """
         SELECT o.order_id, DATE_FORMAT(o.order_date, '%Y-%m-%d %H:%i'),
                COALESCE(o.customer_name,''), o.status_code, COALESCE(v.total,0)
@@ -658,7 +628,6 @@ class DatabaseManager:
         search_text: str = "",
         limit: int = 400,
     ) -> List[OrderRow]:
-        """Список заказов конкретного пользователя."""
         sql = """
         SELECT o.order_id, DATE_FORMAT(o.order_date, '%Y-%m-%d %H:%i'),
                COALESCE(o.customer_name,''), o.status_code, COALESCE(v.total,0)
@@ -680,13 +649,11 @@ class DatabaseManager:
         rows = self.cur.fetchall()
         return [(int(r[0]), r[1], r[2], r[3], float(r[4])) for r in rows]
 
-    # совместимость со старым кодом
     def get_all_orders(self) -> List[Tuple[int, str, str]]:
         self.cur.execute("SELECT order_id, customer_name, status_code FROM Orders ORDER BY order_date DESC")
         return [(int(r[0]), r[1] or "", r[2]) for r in self.cur.fetchall()]
 
     def get_order_items(self, order_id: Union[int, str]) -> Tuple[List[Tuple[str, int, float, float]], float]:
-        """Возвращает (items, total) для заказа."""
         self.cur.execute(
             """
             SELECT mi.name, oi.quantity, oi.price_at_order, (oi.quantity * oi.price_at_order) AS subtotal
@@ -711,7 +678,7 @@ class DatabaseManager:
         if not row:
             raise ValueError("ORDER_NOT_FOUND")
         current = row[0]
-        # Правила переходов
+        # transition rules
         if new_status == "CANCELED":
             if current in ("COMPLETED", "CANCELED"):
                 raise ValueError("INVALID_TRANSITION")
@@ -720,13 +687,8 @@ class DatabaseManager:
         self.cur.execute("UPDATE Orders SET status_code=%s WHERE order_id=%s", (new_status, int(order_id)))
         self.conn.commit()
 
-    # ---------- user cancellation ----------
+    # user cancellation
     def cancel_order_by_user(self, order_id: Union[int, str], requester_user_id: int) -> None:
-        """
-        Отмена заказа пользователем:
-          - Разрешено только владельцу заказа
-          - Разрешены статусы: RECEIVED / IN_PROGRESS / READY
-        """
         self.cur.execute("SELECT user_id, status_code FROM Orders WHERE order_id=%s", (int(order_id),))
         row = self.cur.fetchone()
         if not row:
@@ -739,17 +701,13 @@ class DatabaseManager:
         self.cur.execute("UPDATE Orders SET status_code='CANCELED' WHERE order_id=%s", (int(order_id),))
         self.conn.commit()
 
-    # ---------- courier view ----------
+    # courier view
     def get_delivery_orders(
         self,
         status: Optional[str] = None,
         search_text: str = "",
         limit: int = 400,
     ) -> List[Tuple[int, str, str, str, float, str]]:
-        """
-        Заказы типа DELIVERY (для курьера):
-        -> [(order_id, date, customer, status, total, delivery_address)]
-        """
         sql = """
         SELECT o.order_id,
                DATE_FORMAT(o.order_date, '%Y-%m-%d %H:%i'),
@@ -775,9 +733,8 @@ class DatabaseManager:
         rows = self.cur.fetchall()
         return [(int(r[0]), r[1], r[2], r[3], float(r[4]), r[5]) for r in rows]
 
-    # ---------- analytics ----------
+    # analytics
     def get_status_list(self) -> List[str]:
-        """Список кодов статусов в порядке sort_order (для UI-виджета)."""
         self.cur.execute("SELECT status_code FROM OrderStatusRef ORDER BY sort_order")
         return [r[0] for r in self.cur.fetchall()]
 
@@ -787,10 +744,6 @@ class DatabaseManager:
         end_dt: str,
         statuses: Optional[List[str]] = None,
     ) -> List[Tuple[int, str, str, str, Optional[str], float]]:
-        """
-        Возвращает заказы за период:
-        [(order_id, date, customer, status, service_type, total)]
-        """
         have_service = self._column_exists("Orders", "service_type")
         service_sql = "o.service_type" if have_service else "NULL"
 
@@ -822,10 +775,7 @@ class DatabaseManager:
         statuses: Optional[List[str]] = None,
         limit: int = 20,
     ) -> List[Tuple[str, int, float]]:
-        """
-        ТОП блюд за период (по количеству), с выручкой:
-        [(item_name, qty, revenue)]
-        """
+
         sql = """
         SELECT mi.name,
                SUM(oi.quantity) AS qty,

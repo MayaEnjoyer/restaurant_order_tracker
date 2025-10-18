@@ -1,25 +1,114 @@
-# ui/main_app.py
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, filedialog
 from typing import Tuple, List, Optional
 from datetime import datetime, timedelta
 import csv
 
+import matplotlib
+matplotlib.use("TkAgg")
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+import matplotlib.pyplot as plt
+
+
+class ChartConfigDialog(tk.Toplevel):
+
+    TYPES = [
+        "Revenue over time",
+        "Orders over time",
+        "Top items by qty",
+        "Top items by revenue",
+        "Status distribution",
+    ]
+    GRANULARITIES = ["Day", "Week", "Month"]
+
+    def __init__(self, master):
+        super().__init__(master)
+        self.title("Generate Chart")
+        self.geometry("360x220")
+        self.resizable(False, False)
+        self.transient(master)
+        self.grab_set()
+
+        body = tk.Frame(self); body.pack(fill="both", expand=True, padx=12, pady=10)
+
+        tk.Label(body, text="Chart type:").grid(row=0, column=0, sticky="w")
+        self.type_var = tk.StringVar(value=self.TYPES[0])
+        self.type_cb = ttk.Combobox(body, textvariable=self.type_var, values=self.TYPES, state="readonly", width=26)
+        self.type_cb.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(2, 8))
+        self.type_cb.bind("<<ComboboxSelected>>", lambda e: self._toggle_controls())
+
+        # Гранулярність для часових рядів
+        self.gran_lbl = tk.Label(body, text="Granularity (time series):")
+        self.gran_var = tk.StringVar(value=self.GRANULARITIES[0])
+        self.gran_cb = ttk.Combobox(body, textvariable=self.gran_var, values=self.GRANULARITIES, state="readonly", width=18)
+
+        self.top_lbl = tk.Label(body, text="Top N items:")
+        self.top_var = tk.IntVar(value=10)
+        self.top_spin = tk.Spinbox(body, from_=3, to=50, textvariable=self.top_var, width=6)
+
+        self.gran_lbl.grid(row=2, column=0, sticky="w", pady=(0,2))
+        self.gran_cb.grid(row=3, column=0, sticky="w", pady=(0,8))
+        self.top_lbl.grid(row=2, column=1, sticky="w", padx=(12,0), pady=(0,2))
+        self.top_spin.grid(row=3, column=1, sticky="w", padx=(12,0), pady=(0,8))
+
+        self._toggle_controls()
+
+        btns = tk.Frame(self); btns.pack(fill="x", padx=12, pady=(0,10))
+        tk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
+        tk.Button(btns, text="OK", command=self._ok).pack(side="right", padx=(0,8))
+
+        self.result = None
+
+    def _toggle_controls(self):
+        t = self.type_var.get()
+        is_timeseries = t in ("Revenue over time", "Orders over time")
+        is_top = t in ("Top items by qty", "Top items by revenue")
+
+        # Time series controls
+        if is_timeseries:
+            self.gran_lbl.grid()
+            self.gran_cb.grid()
+        else:
+            self.gran_lbl.grid_remove()
+            self.gran_cb.grid_remove()
+
+        # Top N controls
+        if is_top:
+            self.top_lbl.grid()
+            self.top_spin.grid()
+        else:
+            self.top_lbl.grid_remove()
+            self.top_spin.grid_remove()
+
+    def _ok(self):
+        t = self.type_var.get()
+        cfg = {"type": t}
+        if t in ("Revenue over time", "Orders over time"):
+            cfg["granularity"] = self.gran_var.get()
+        if t in ("Top items by qty", "Top items by revenue"):
+            cfg["top_n"] = int(self.top_var.get())
+        self.result = cfg
+        self.destroy()
+
+    def _cancel(self):
+        self.result = None
+        self.destroy()
+
 
 class MainApp(tk.Toplevel):
     """
-    USER:
-      - Ліва панель: кошик і створення замовлення (DINE_IN/TAKEAWAY/DELIVERY).
-      - Права панель 'My Orders' з переглядом і відміною СВОГО замовлення.
+USER:
+- Left panel: cart and order creation (DINE_IN/TAKEAWAY/DELIVERY).
+- Right panel 'My Orders' with viewing and canceling YOUR order.
 
-    ADMIN:
-      - Після входу під адміном запитуємо:
-          1) Admin Access Code
-          2) Другий код (admin / chef / courier)
-        Відповідно відкривається вкладка(и) всередині Admin.
-    """
+ADMIN:
+- After logging in as admin, we request:
+1) Admin Access Code
+2) Second code (admin / chef / courier)
+Accordingly, the tab(s) inside Admin opens.
+"""
 
-    # --------------------------------------------------------------------- init
+    # init
     def __init__(self, master, db_manager, user_tuple: Tuple[int, str, str], on_logout):
         super().__init__(master)
         self.db = db_manager
@@ -38,11 +127,11 @@ class MainApp(tk.Toplevel):
         self._build_orders_tab()
 
         if self.role == "admin":
-            self._maybe_add_admin_tab()  # подвійний код і відкриття потрібної вкладки
+            self._maybe_add_admin_tab()
 
         self.protocol("WM_DELETE_WINDOW", self._logout)
 
-    # --------------------------------------------------------------- shell/topbar
+    # shell/topbar
     def _build_shell(self):
         topbar = tk.Frame(self)
         topbar.pack(fill="x")
@@ -66,12 +155,12 @@ class MainApp(tk.Toplevel):
         self.nb = ttk.Notebook(self)
         self.nb.pack(fill="both", expand=True)
 
-    # --------------------------------------------------------------- Orders tab
+    # Orders tab
     def _build_orders_tab(self):
         self.orders_tab = tk.Frame(self.nb)
         self.nb.add(self.orders_tab, text="Orders")
 
-        # ----------------------------- Left pane: New Order
+        # Left pane: New Order
         left = tk.LabelFrame(self.orders_tab, text="New Order")
         left.pack(side="left", fill="y", padx=10, pady=10)
 
@@ -118,7 +207,7 @@ class MainApp(tk.Toplevel):
         tk.Entry(left, textvariable=self.customer_var, width=28)\
             .grid(row=8, column=0, padx=6, pady=(0, 4))
 
-        # ----------------------------- Right pane
+        # Right pane
         if self.role == "admin":
             self._build_admin_right_panel()
             self._reload_orders_admin()
@@ -137,7 +226,7 @@ class MainApp(tk.Toplevel):
             self.cat_sel.set(cat_names[0])
             self._load_items_for_category()
 
-    # ------------------------------------------ Orders helpers (left pane / cart)
+    # Orders helpers (left pane/cart)
     def _load_items_for_category(self):
         self.items_listbox.delete(0, tk.END)
         cat = self.cat_sel.get()
@@ -164,7 +253,7 @@ class MainApp(tk.Toplevel):
         for i in reversed(sel):
             self.cart_list.delete(i)
 
-    # ------------------------------------------------------- Create order flow
+    # Create order flow
     def _open_create_order_dialog(self):
         if self.cart_list.size() == 0:
             messagebox.showwarning("Cart is empty", "Add items to the cart first.")
@@ -255,7 +344,7 @@ class MainApp(tk.Toplevel):
         else:
             self._reload_orders_admin()
 
-    # ------------------------------------------------------ user right panel
+    # user right panel
     def _build_user_right_panel(self, hidden: bool = False):
         self.user_right = tk.LabelFrame(self.orders_tab, text="My Orders")
 
@@ -302,7 +391,7 @@ class MainApp(tk.Toplevel):
             self.user_right.pack(side="right", fill="both", expand=True, padx=10, pady=10)
             self._user_right_visible = True
 
-    # ------------------------------------------------------ admin right panel
+    # admin right panel
     def _build_admin_right_panel(self):
         right = tk.LabelFrame(self.orders_tab, text="Existing Orders")
         right.pack(side="right", fill="both", expand=True, padx=10, pady=10)
@@ -337,7 +426,7 @@ class MainApp(tk.Toplevel):
         tk.Button(btns, text="Cancel", command=self._cancel_order_admin).pack(side="left")
         tk.Button(btns, text="Refresh", command=self._reload_orders_admin).pack(side="right")
 
-    # ---------------------------------------------------------- reload (right)
+    # reload (right)
     def _reload_orders_user(self):
         if self.role != "user" or not hasattr(self, "user_tree"):
             return
@@ -362,7 +451,7 @@ class MainApp(tk.Toplevel):
         for oid, dt, cust, st, total in self.db.get_orders(status=status, search_text=search, limit=600):
             self.admin_tree.insert("", "end", values=(oid, dt, cust, st, f"{total:.2f}"))
 
-    # ----------------------------------------------------- details helpers
+    # details helpers
     def _get_selected_id_from_tree(self, tree: ttk.Treeview) -> Optional[int]:
         sel = tree.focus()
         if not sel:
@@ -434,7 +523,7 @@ class MainApp(tk.Toplevel):
             .pack(anchor="e", padx=12, pady=(0, 10))
         tk.Button(win, text="Close", command=win.destroy).pack(pady=(0, 10))
 
-    # ---------------------------------------------------------- admin actions
+    # admin actions
     def _advance_status_admin(self):
         oid = self._get_selected_id_from_tree(self.admin_tree)
         if not oid:
@@ -467,7 +556,7 @@ class MainApp(tk.Toplevel):
             return
         self._reload_orders_admin()
 
-    # ---------------------------------------------------------- user actions
+    # user actions
     def _user_cancel_order(self):
         if self.role != "user":
             return
@@ -486,7 +575,7 @@ class MainApp(tk.Toplevel):
         messagebox.showinfo("Canceled", f"Order #{oid} canceled.")
         self._reload_orders_user()
 
-    # ----------------------------------------------------------- Admin tab (UI)
+    # Admin tab (UI)
     def _maybe_add_admin_tab(self):
         # 1) admin code
         admin_code = simpledialog.askstring("Admin Access", "Enter admin access code:", show="*", parent=self)
@@ -509,7 +598,7 @@ class MainApp(tk.Toplevel):
             messagebox.showerror("Access denied", "Unknown area code.")
             return
 
-        # створюємо вкладку Admin і додаємо підвкладки залежно від area
+        # create an Admin tab and add subtabs depending on the area
         self.admin_tab = tk.Frame(self.nb)
         self.nb.add(self.admin_tab, text="Admin")
         self.nb.select(self.admin_tab)
@@ -526,7 +615,7 @@ class MainApp(tk.Toplevel):
         elif area == "courier":
             self._add_courier_subtab()
 
-    # ------------------------------------------- Admin / Menu management (tabs)
+    # Admin/Menu management (tabs)
     def _build_admin_menu_tab(self):
         tab = tk.Frame(self.admin_nb)
         self.admin_nb.add(tab, text="Menu")
@@ -593,7 +682,7 @@ class MainApp(tk.Toplevel):
         for iid, name, price, _cid, active in self.admin_items_cache:
             self.admin_items_tree.insert("", "end", values=(iid, name, f"{price:.2f}", "Yes" if active else "No"))
 
-        # sync з користувацькою вкладкою
+        # sync with custom tab
         self.categories = self.db.get_categories()
         self.cat_id_by_name = {n: i for i, n in self.categories}
         self.cat_combo["values"] = [n for _, n in self.categories]
@@ -702,7 +791,7 @@ class MainApp(tk.Toplevel):
         self._admin_clear_item_form()
         self._admin_refresh_items()
 
-    # ------------------------------------------- Admin / Orders management
+    # Admin/Orders management
     def _build_admin_orders_tab(self):
         tab = tk.Frame(self.admin_nb)
         self.admin_nb.add(tab, text="Orders")
@@ -787,7 +876,7 @@ class MainApp(tk.Toplevel):
             return
         self._admin_reload_orders_tab()
 
-    # ------------------------------------------------------ Admin / Analytics
+    # Admin/Analytics
     def _build_admin_analytics_tab(self):
         tab = tk.Frame(self.admin_nb)
         self.admin_nb.add(tab, text="Analytics")
@@ -819,6 +908,8 @@ class MainApp(tk.Toplevel):
         tk.Button(filters, text="Run", command=self._run_analytics).pack(side="left", padx=(4, 2))
         tk.Button(filters, text="Export Orders CSV", command=self._export_orders_csv).pack(side="left", padx=(4, 2))
         tk.Button(filters, text="Export Top Items CSV", command=self._export_top_items_csv).pack(side="left", padx=(4, 2))
+        # NEW: Generate chart
+        tk.Button(filters, text="Generate Chart...", command=self._open_chart_config).pack(side="left", padx=(8, 2))
 
         summary = tk.LabelFrame(tab, text="Summary")
         summary.pack(fill="x", padx=10, pady=(0, 6))
@@ -975,7 +1066,7 @@ class MainApp(tk.Toplevel):
 
         messagebox.showinfo("Export", "Top Items CSV saved.")
 
-    # ----------------------------- підвкладки Chef/Courier всередині Admin ----
+    # Chef/Courier subroutines inside Admin
     def _add_chef_subtab(self):
         parent = tk.Frame(self.admin_nb)
         self.admin_nb.add(parent, text="Chef")
@@ -1189,7 +1280,7 @@ class MainApp(tk.Toplevel):
             return
         self._reload_courier_orders()
 
-    # --------------------------------------------------------------- account ops
+    # account ops
     def _change_password(self):
         old = simpledialog.askstring("Change Password", "Current password:", show="*", parent=self)
         if old is None:
@@ -1234,3 +1325,289 @@ class MainApp(tk.Toplevel):
             self.on_logout()
         finally:
             self.destroy()
+
+    # frame1
+    def _open_chart_config(self):
+        dlg = ChartConfigDialog(self)
+        self.wait_window(dlg)
+        cfg = dlg.result
+        if not cfg:
+            return
+        try:
+            self._generate_chart(cfg)
+        except Exception as e:
+            messagebox.showerror("Chart error", str(e))
+
+    def _period_and_statuses_for_charts(self) -> Optional[Tuple[str, str, Optional[List[str]]]]:
+        period = self._parse_period()
+        if not period:
+            return None
+        start_dt, end_dt = period
+        statuses = self._selected_statuses()
+        return start_dt, end_dt, statuses
+
+    def _fetch_orders_for_charts(self, start_dt: str, end_dt: str, statuses: Optional[List[str]]):
+        try:
+            orders = self.db.report_orders(start_dt, end_dt, statuses=statuses)
+        except AttributeError:
+            rows = self.db.get_orders(status=None, search_text="", limit=1000)
+            orders = [(oid, dt, cust, st, "", total) for (oid, dt, cust, st, total) in rows]
+        return orders
+
+    def _fetch_top_items_for_charts(self, start_dt: str, end_dt: str, statuses: Optional[List[str]], top_n: int):
+        try:
+            items = self.db.report_top_items(start_dt, end_dt, statuses=statuses, limit=top_n)
+        except AttributeError:
+            items = []
+        return items
+
+    def _generate_chart(self, cfg: dict):
+
+        params = self._period_and_statuses_for_charts()
+        if not params:
+            return
+        start_dt, end_dt, statuses = params
+
+        ctype = cfg.get("type")
+
+        if ctype in ("Revenue over time", "Orders over time"):
+            orders = self._fetch_orders_for_charts(start_dt, end_dt, statuses)
+            self._generate_timeseries_chart(orders, cfg, start_dt, end_dt, statuses)  # Реалізація у Частині 2
+
+        elif ctype in ("Top items by qty", "Top items by revenue"):
+            top_n = int(cfg.get("top_n", 10))
+            items = self._fetch_top_items_for_charts(start_dt, end_dt, statuses, top_n)
+            self._generate_top_items_chart(items, cfg, start_dt, end_dt, statuses)  # Частина 2
+
+        elif ctype == "Status distribution":
+            orders = self._fetch_orders_for_charts(start_dt, end_dt, statuses)
+            self._generate_status_distribution_chart(orders, start_dt, end_dt, statuses)  # Частина 2
+
+        else:
+            messagebox.showwarning("Chart", "Unknown chart type.")
+
+    def _generate_timeseries_chart(self, orders, cfg, start_dt, end_dt, statuses):
+        raise NotImplementedError("Part 2 will add the chart rendering logic.")
+
+    def _generate_top_items_chart(self, items, cfg, start_dt, end_dt, statuses):
+        raise NotImplementedError("Part 2 will add the chart rendering logic.")
+
+    def _generate_status_distribution_chart(self, orders, start_dt, end_dt, statuses):
+        raise NotImplementedError("Part 2 will add the chart rendering logic.")
+
+    def _parse_dt_str(self, s: str) -> Optional[datetime]:
+        if not s:
+            return None
+        try:
+            return datetime.fromisoformat(s)
+        except Exception:
+            pass
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(s, fmt)
+            except Exception:
+                continue
+        return None
+
+    def _bucket_key(self, dt_obj: datetime, granularity: str):
+        d = dt_obj.date()
+        g = (granularity or "Day").lower()
+        if g == "week":
+            # Monday as the beginning of the week
+            start = d - timedelta(days=dt_obj.isoweekday() - 1)
+            year, week, _ = dt_obj.isocalendar()
+            label = f"{year}-W{week:02d}"
+            return start, label
+        elif g == "month":
+            first = d.replace(day=1)
+            label = first.strftime("%Y-%m")
+            return first, label
+        else:
+            label = d.strftime("%Y-%m-%d")
+            return d, label
+
+    def _statuses_label(self, statuses: Optional[List[str]]) -> str:
+        return ", ".join(statuses) if statuses else "All"
+
+    def _open_chart_window(self, fig, title: str):
+        win = tk.Toplevel(self)
+        win.title(title)
+        win.geometry("880x620")
+        win.transient(self)
+
+        top = tk.Frame(win); top.pack(fill="x")
+        canvas = FigureCanvasTkAgg(fig, master=win)
+        toolbar = NavigationToolbar2Tk(canvas, top)
+        toolbar.update()
+
+        canvas_widget = canvas.get_tk_widget()
+        canvas_widget.pack(fill="both", expand=True)
+
+        bottom = tk.Frame(win); bottom.pack(fill="x", padx=8, pady=6)
+        def _save_png():
+            path = filedialog.asksaveasfilename(
+                defaultextension=".png",
+                filetypes=[("PNG Image", "*.png")],
+                title="Save chart as PNG",
+                initialfile="chart.png",
+                parent=win,
+            )
+            if path:
+                try:
+                    fig.savefig(path, dpi=150, bbox_inches="tight")
+                    messagebox.showinfo("Saved", "Chart saved successfully.", parent=win)
+                except Exception as e:
+                    messagebox.showerror("Error", str(e), parent=win)
+
+        tk.Button(bottom, text="Save PNG...", command=_save_png).pack(side="right")
+        tk.Button(bottom, text="Close", command=win.destroy).pack(side="right", padx=(0, 8))
+
+        canvas.draw()
+
+    # specific diagrams
+
+    def _generate_timeseries_chart(self, orders, cfg, start_dt, end_dt, statuses):
+
+        if not orders:
+            messagebox.showinfo("Chart", "No data for selected period.")
+            return
+
+        gran = cfg.get("granularity", "Day")
+        chart_type = cfg.get("type", "Revenue over time")
+
+        # Агрегація
+        values_by_key = {}
+        labels_by_key = {}
+
+        for oid, dt_str, _cust, _st, _srv, total in orders:
+            dt_obj = self._parse_dt_str(dt_str)
+            if not dt_obj:
+                continue
+            sort_key, label = self._bucket_key(dt_obj, gran)
+            labels_by_key[sort_key] = label
+            if chart_type == "Orders over time":
+                values_by_key[sort_key] = values_by_key.get(sort_key, 0) + 1
+            else:
+                try:
+                    val = float(total)
+                except Exception:
+                    val = 0.0
+                values_by_key[sort_key] = values_by_key.get(sort_key, 0.0) + val
+
+        if not values_by_key:
+            messagebox.showinfo("Chart", "No data for selected period.")
+            return
+
+        keys_sorted = sorted(values_by_key.keys())
+        x_labels = [labels_by_key[k] for k in keys_sorted]
+        y_vals = [values_by_key[k] for k in keys_sorted]
+
+        fig, ax = plt.subplots(figsize=(9, 5), dpi=100)
+        ax.plot(range(len(x_labels)), y_vals, marker="o")
+        ax.set_xticks(range(len(x_labels)))
+        ax.set_xticklabels(x_labels, rotation=30, ha="right")
+
+        metric = "Orders" if chart_type == "Orders over time" else "Revenue"
+        ax.set_xlabel(gran)
+        ax.set_ylabel(metric)
+        ax.grid(True, axis="y", linestyle="--", alpha=0.35)
+
+        ymax = max(y_vals) if y_vals else 0
+        offset = (ymax * 0.03) if ymax else 0.5
+        for i, v in enumerate(y_vals):
+            label = f"{int(v)}" if chart_type == "Orders over time" else f"{v:.2f}"
+            ax.text(i, v + offset, label, ha="center", va="bottom", fontsize=9)
+
+        period_str = f"{start_dt[:10]} — {end_dt[:10]}"
+        ax.set_title(f"{chart_type} ({gran})\n{period_str} | Statuses: {self._statuses_label(statuses)}")
+
+        self._open_chart_window(fig, f"{chart_type} ({gran})")
+
+    def _generate_top_items_chart(self, items, cfg, start_dt, end_dt, statuses):
+
+        if not items:
+            messagebox.showinfo("Chart", "No data for selected period.")
+            return
+
+        top_n = int(cfg.get("top_n", 10))
+        chart_type = cfg.get("type", "Top items by qty")
+
+        # Сортування
+        if chart_type == "Top items by qty":
+            items_sorted = sorted(items, key=lambda r: int(r[1] or 0), reverse=True)
+            names = [r[0] for r in items_sorted[:top_n]]
+            vals = [int(r[1] or 0) for r in items_sorted[:top_n]]
+            val_fmt = lambda v: f"{int(v)}"
+            ylabel = "Quantity"
+        else:
+            items_sorted = sorted(items, key=lambda r: float(r[2] or 0.0), reverse=True)
+            names = [r[0] for r in items_sorted[:top_n]]
+            vals = [float(r[2] or 0.0) for r in items_sorted[:top_n]]
+            val_fmt = lambda v: f"{v:.2f}"
+            ylabel = "Revenue"
+
+        if not names:
+            messagebox.showinfo("Chart", "No data to display.")
+            return
+
+        names_plot = list(reversed(names))
+        vals_plot = list(reversed(vals))
+
+        fig, ax = plt.subplots(figsize=(9, 6), dpi=100)
+        bars = ax.barh(range(len(names_plot)), vals_plot)
+        ax.set_yticks(range(len(names_plot)))
+        ax.set_yticklabels(names_plot)
+        ax.set_xlabel(ylabel)
+        ax.set_ylabel("Item")
+        ax.grid(True, axis="x", linestyle="--", alpha=0.35)
+
+        for rect, v in zip(bars, vals_plot):
+            width = rect.get_width()
+            y = rect.get_y() + rect.get_height() / 2
+            ax.text(width, y, "  " + val_fmt(v), va="center", ha="left", fontsize=9)
+
+        period_str = f"{start_dt[:10]} — {end_dt[:10]}"
+        ax.set_title(f"{chart_type}\n{period_str} | Statuses: {self._statuses_label(statuses)}")
+
+        self._open_chart_window(fig, chart_type)
+
+    def _generate_status_distribution_chart(self, orders, start_dt, end_dt, statuses):
+        if not orders:
+            messagebox.showinfo("Chart", "No data for selected period.")
+            return
+
+        try:
+            known = self.db.get_status_list()
+        except Exception:
+            known = ["RECEIVED", "IN_PROGRESS", "READY", "COMPLETED", "CANCELED"]
+
+        counts = {s: 0 for s in known}
+        for _oid, _dt, _cust, st, _srv, _total in orders:
+            if st in counts:
+                counts[st] += 1
+            else:
+                counts[st] = counts.get(st, 0) + 1
+
+        # we will remove the zeros, if all zeros - we will leave them as they are
+        non_zero = [s for s, c in counts.items() if c > 0]
+        labels = (non_zero if non_zero else list(counts.keys()))
+        values = [counts[s] for s in labels]
+
+        fig, ax = plt.subplots(figsize=(9, 5), dpi=100)
+        bars = ax.bar(labels, values)
+        ax.set_ylabel("Orders")
+        ax.set_xlabel("Status")
+        ax.grid(True, axis="y", linestyle="--", alpha=0.35)
+
+        # signatures above the stoppers
+        ymax = max(values) if values else 0
+        offset = (ymax * 0.03) if ymax else 0.5
+        for rect, v in zip(bars, values):
+            x = rect.get_x() + rect.get_width() / 2
+            y = rect.get_height()
+            ax.text(x, y + offset, f"{int(v)}", ha="center", va="bottom", fontsize=9)
+
+        period_str = f"{start_dt[:10]} — {end_dt[:10]}"
+        ax.set_title(f"Status distribution\n{period_str} | Statuses: {self._statuses_label(statuses)}")
+
+        self._open_chart_window(fig, "Status distribution")

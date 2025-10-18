@@ -5,12 +5,6 @@ from typing import Optional, Tuple, Callable
 
 
 class LoginFrame(tk.Frame):
-    """
-    Экран входа + ссылка на регистрацию.
-    on_success(user_tuple) -> (user_id, username, role)
-    on_go_register()       -> опциональный колбэк из main.py для показа окна регистрации.
-                              Если не передан, используется встроенное RegisterFrame.
-    """
 
     def __init__(
         self,
@@ -26,7 +20,6 @@ class LoginFrame(tk.Frame):
 
         self._build_login()
 
-    # ---------------- UI ----------------
     def _build_login(self) -> None:
         self.pack(fill="both", expand=True)
         self.columnconfigure(0, weight=1)
@@ -60,7 +53,6 @@ class LoginFrame(tk.Frame):
         link.pack(side="left", padx=(4, 0))
         link.bind("<Button-1>", lambda _e: self._open_register())
 
-    # ------------- handlers -------------
     def _login_user(self) -> None:
         u = self.username.get().strip()
         p = self.password.get()
@@ -86,7 +78,6 @@ class LoginFrame(tk.Frame):
         self.on_success(user)
 
     def _open_register(self) -> None:
-        """Либо вызываем колбэк из main.py, либо показываем встроенную форму регистрации."""
         if callable(self.on_go_register):
             self.on_go_register()
         else:
@@ -95,7 +86,6 @@ class LoginFrame(tk.Frame):
 
 
 class RegisterFrame(tk.Frame):
-    """Регистрация только обычных пользователей (role='user')."""
 
     def __init__(self, master, db_manager, on_success: Callable[[Tuple[int, str, str]], None]):
         super().__init__(master)
